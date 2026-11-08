@@ -1,0 +1,103 @@
+{
+ "name": "expr",
+ "rules": {
+  "program": {
+   "type": "SYMBOL",
+   "name": "_expr"
+  },
+  "_expr": {
+   "type": "CHOICE",
+   "members": [
+    {
+     "type": "SYMBOL",
+     "name": "binary"
+    },
+    {
+     "type": "SYMBOL",
+     "name": "number"
+    }
+   ]
+  },
+  "binary": {
+   "type": "CHOICE",
+   "members": [
+    {
+     "type": "PREC_LEFT",
+     "value": 1,
+     "content": {
+      "type": "SEQ",
+      "members": [
+       {
+        "type": "SYMBOL",
+        "name": "_expr"
+       },
+       {
+        "type": "STRING",
+        "value": "-"
+       },
+       {
+        "type": "SYMBOL",
+        "name": "_expr"
+       }
+      ]
+     }
+    },
+    {
+     "type": "PREC_LEFT",
+     "value": 2,
+     "content": {
+      "type": "SEQ",
+      "members": [
+       {
+        "type": "SYMBOL",
+        "name": "_expr"
+       },
+       {
+        "type": "STRING",
+        "value": "*"
+       },
+       {
+        "type": "SYMBOL",
+        "name": "_expr"
+       }
+      ]
+     }
+    },
+    {
+     "type": "PREC_RIGHT",
+     "value": 3,
+     "content": {
+      "type": "SEQ",
+      "members": [
+       {
+        "type": "SYMBOL",
+        "name": "_expr"
+       },
+       {
+        "type": "STRING",
+        "value": "^"
+       },
+       {
+        "type": "SYMBOL",
+        "name": "_expr"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "number": {
+   "type": "PATTERN",
+   "value": "[0-9]+"
+  }
+ },
+ "extras": [
+  {
+   "type": "PATTERN",
+   "value": "\\s"
+  }
+ ],
+ "supertypes": [
+  "_expr"
+ ]
+}

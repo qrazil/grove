@@ -6,7 +6,12 @@
  * long the PEG prototype takes to parse the file. Not run by test.sh except
  * with --bench; a time is not a fixture, nothing compares it. */
 
+import core.GRV_glr;
 import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
 import core.GRV_json;
 import core.GRV_peg;
 import io;
@@ -55,12 +60,28 @@ match (GRV_grammar.load(source)) {
         print("grammar load (read + lower): " + grammar.name + ", " + str(grammar.rule_name.size()) + " rules, " + str(grammar.kind.size()) + " rule nodes, " + str(elapsed_ms(began_load)) + " ms");
         if (argv.size() > 2) {
             str text = slurp(argv[2]);
-            int began_parse = timer.monotonic_ns();
-            GRV_peg.Tree tree = GRV_peg.parse(grammar, text);
-            if (tree.root >= 0) {
-                print("peg parse: " + str(text.size()) + " bytes, " + str(tree.rule.size()) + " tree nodes, " + str(elapsed_ms(began_parse)) + " ms");
+            int began_tables = timer.monotonic_ns();
+            GRV_lang.Lang lang = GRV_lang.build(grammar);
+            GRV_lexer.Lexer lexer = GRV_lexer.make(GRV_lr.build(lang));
+            print("tables: " + str(elapsed_ms(began_tables)) + " ms");
+            int began_glr = timer.monotonic_ns();
+            GRV_tree.Tree glr_tree = GRV_glr.parse(lexer, text);
+            if (glr_tree.root >= 0) {
+                print("glr parse (cold lexer): " + str(text.size()) + " bytes, " + str(glr_tree.node_symbol.size()) + " tree nodes, " + str(elapsed_ms(began_glr)) + " ms, " + str(lexer.dfa_states) + " dfa states");
             } else {
-                print("peg parse failed at byte " + str(tree.error_at));
+                print("glr parse failed at byte " + str(glr_tree.error_at));
+            }
+            int began_again = timer.monotonic_ns();
+            GRV_glr.parse(lexer, text);
+            print("glr parse (warm lexer): " + str(elapsed_ms(began_again)) + " ms");
+            if (text.size() < 300000 && grammar.name == "json") {
+                int began_parse = timer.monotonic_ns();
+                GRV_peg.Tree tree = GRV_peg.parse(grammar, text);
+                if (tree.root >= 0) {
+                    print("peg parse: " + str(tree.rule.size()) + " tree nodes, " + str(elapsed_ms(began_parse)) + " ms");
+                } else {
+                    print("peg parse failed at byte " + str(tree.error_at));
+                }
             }
         }
     }

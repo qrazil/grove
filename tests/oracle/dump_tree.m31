@@ -1,0 +1,57 @@
+/* Dump the trees grove parses, in the format of dump_sexp.lua, for the oracle
+ * comparison (tests/oracle/compare.py).
+ *
+ *   dump_tree GRAMMAR.json PATH [PATH ...]
+ *
+ * Output, per file: `@@ PATH`, then the tree, or `!! PATH: error at BYTE`. The
+ * tables are built once for all the files. */
+
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
+import io;
+import os;
+
+List<str> argv = os.arguments();
+if (argv.size() < 3) {
+    print("usage: dump_tree GRAMMAR.json PATH [PATH ...]");
+    os.exit(2);
+}
+match (io.read(argv[1])) {
+    case Err(io.Error failure): {
+        print("cannot read " + argv[1]);
+        os.exit(1);
+    }
+    case Ok(str text): {
+        match (GRV_grammar.load(text)) {
+            case Err(str reason): {
+                print(reason);
+                os.exit(1);
+            }
+            case Ok(GRV_grammar.Grammar grammar): {
+                GRV_lang.Lang lang = GRV_lang.build(grammar);
+                GRV_lr.Table table = GRV_lr.build(lang);
+                GRV_lexer.Lexer lexer = GRV_lexer.make(table);
+                for (int cursor in 2 .. argv.size()) {
+                    match (io.read(argv[cursor])) {
+                        case Err(io.Error failure): {
+                            print("!! " + argv[cursor] + ": unreadable");
+                        }
+                        case Ok(str source): {
+                            GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
+                            print("@@ " + argv[cursor]);
+                            if (tree.root >= 0) {
+                                print(tree.sexp());
+                            } else {
+                                print("!! " + argv[cursor] + ": error at " + str(tree.error_at));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

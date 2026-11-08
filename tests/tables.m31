@@ -1,0 +1,50 @@
+/* Table build times and sizes.
+ *
+ *   tables GRAMMAR.json [GRAMMAR.json ...]
+ *
+ * One line per grammar: milliseconds to load the JSON, to flatten it into
+ * productions, and to build the parse tables; the symbols, productions, states,
+ * table entries (8 bytes each as an Array of int), GLR forks and conflicts
+ * resolved by precedence. Not run by test.sh: a time is not a fixture. */
+
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lr;
+import io;
+import os;
+import timer;
+
+int millis(int from_ns) {
+    return (timer.monotonic_ns() - from_ns) / 1000000;
+}
+
+List<str> argv = os.arguments();
+if (argv.size() < 2) {
+    print("usage: tables GRAMMAR.json [GRAMMAR.json ...]");
+    os.exit(2);
+}
+for (int index in 1 .. argv.size()) {
+    match (io.read(argv[index])) {
+        case Err(io.Error failure): {
+            print(argv[index] + ": unreadable");
+        }
+        case Ok(str text): {
+            int began = timer.monotonic_ns();
+            match (GRV_grammar.load(text)) {
+                case Err(str reason): {
+                    print(argv[index] + ": " + reason);
+                }
+                case Ok(GRV_grammar.Grammar grammar): {
+                    int loaded = millis(began);
+                    int flattening = timer.monotonic_ns();
+                    GRV_lang.Lang lang = GRV_lang.build(grammar);
+                    int flattened = millis(flattening);
+                    int building = timer.monotonic_ns();
+                    GRV_lr.Table table = GRV_lr.build(lang);
+                    int built = millis(building);
+                    print(grammar.name + ": load " + str(loaded) + " ms, flatten " + str(flattened) + " ms, tables " + str(built) + " ms; " + str(lang.symbol_name.size()) + " symbols, " + str(lang.prod_lhs.size()) + " productions, " + str(table.state_count()) + " states, " + str(table.entries.size()) + " entries (" + str(table.entries.size() * 8 / 1024) + " KB), " + str(table.forks) + " forks, " + str(table.resolved) + " resolved");
+                }
+            }
+        }
+    }
+}

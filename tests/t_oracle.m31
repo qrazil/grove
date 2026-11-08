@@ -1,10 +1,17 @@
 /* The oracle: grove's trees against tree-sitter's, for the fixtures of
  * tests/oracle/fixtures.tsv (the dumps in tests/oracle/ts come from
  * tests/oracle/refresh.sh). Node types, field names and byte ranges must be
- * identical; any difference is a failure, there is no floor yet. */
+ * identical; any difference is a failure, there is no floor yet.
+ *
+ * The parser under test is the LR/GLR one (GRV_glr). The PEG prototype is
+ * checked on json in t_peg. */
 
+import core.GRV_glr;
 import core.GRV_grammar;
-import core.GRV_peg;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
 import io;
 import tests.GRV_check;
 
@@ -21,22 +28,49 @@ str read_or_empty(str path) {
     }
 }
 
-match (GRV_grammar.load(read_or_empty("tests/data/json/grammar.json"))) {
-    case Err(str reason): {
-        check.ok("load json grammar: " + reason, false);
+// the lexer (and through it the tables) of tests/data/LANG/grammar.json
+Option<GRV_lexer.Lexer> lexer_for(str language) {
+    match (GRV_grammar.load(read_or_empty("tests/data/" + language + "/grammar.json"))) {
+        case Err(str reason): {
+            return Option<GRV_lexer.Lexer>.None;
+        }
+        case Ok(GRV_grammar.Grammar grammar): {
+            GRV_lang.Lang lang = GRV_lang.build(grammar);
+            GRV_lr.Table table = GRV_lr.build(lang);
+            return Option<GRV_lexer.Lexer>.Some(GRV_lexer.make(table));
+        }
     }
-    case Ok(GRV_grammar.Grammar grammar): {
-        for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
-            List<str> columns = row.split("\t");
-            if (row.starts_with("#") || columns.size() < 2) {
+}
+
+Map<str, GRV_lexer.Lexer> lexers = {};
+for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
+    List<str> columns = row.split("\t");
+    if (row.starts_with("#") || columns.size() < 2) {
+        continue;
+    }
+    str language = columns[0];
+    str path = columns[1];
+    if (!lexers.contains(language)) {
+        match (lexer_for(language)) {
+            case Some(GRV_lexer.Lexer made): {
+                lexers.set(language, made);
+            }
+            case None: {
+                check.ok("grammar for " + language, false);
                 continue;
             }
-            str path = columns[1];
-            str dump = read_or_empty("tests/oracle/ts/" + path.split("/").join("__") + ".sexp");
-            List<str> dump_lines = dump.split("\n");
-            // drop the "@@ lang path" header and the trailing newline's empty line
-            str want = dump_lines.slice(1, dump_lines.size() - 1).join("\n");
-            GRV_peg.Tree tree = GRV_peg.parse(grammar, read_or_empty(path));
+        }
+    }
+    str dump = read_or_empty("tests/oracle/ts/" + path.split("/").join("__") + ".sexp");
+    List<str> dump_lines = dump.split("\n");
+    // drop the "@@ lang path" header and the trailing newline's empty line
+    str want = dump_lines.slice(1, dump_lines.size() - 1).join("\n");
+    match (lexers.get(language)) {
+        case None: {
+            continue;
+        }
+        case Some(GRV_lexer.Lexer lexer): {
+            GRV_tree.Tree tree = GRV_glr.parse(lexer, read_or_empty(path));
             if (tree.root < 0) {
                 check.ok(path + ": parse failed at byte " + str(tree.error_at), false);
             } else {

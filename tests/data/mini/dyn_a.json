@@ -1,0 +1,55 @@
+{
+ "name": "dyn_a",
+ "rules": {
+  "program": {
+   "type": "SEQ",
+   "members": [
+    {
+     "type": "CHOICE",
+     "members": [
+      {
+       "type": "PREC_DYNAMIC",
+       "value": 1,
+       "content": {
+        "type": "SYMBOL",
+        "name": "a"
+       }
+      },
+      {
+       "type": "SYMBOL",
+       "name": "b"
+      }
+     ]
+    },
+    {
+     "type": "STRING",
+     "value": ";"
+    }
+   ]
+  },
+  "a": {
+   "type": "SEQ",
+   "members": [
+    {
+     "type": "STRING",
+     "value": "x"
+    }
+   ]
+  },
+  "b": {
+   "type": "SEQ",
+   "members": [
+    {
+     "type": "STRING",
+     "value": "x"
+    }
+   ]
+  }
+ },
+ "extras": [
+  {
+   "type": "PATTERN",
+   "value": "\\s"
+  }
+ ]
+}

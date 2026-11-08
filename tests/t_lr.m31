@@ -1,0 +1,62 @@
+/* Parse tables: shape and determinism, on the vendored json, lua and c grammars.
+ * Counts are checked as relations (no forks in json, repeatable, bounded by the
+ * grammar), never as times. */
+
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lr;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+Option<GRV_lang.Lang> lang_of(str language) {
+    match (io.read("tests/data/" + language + "/grammar.json")) {
+        case Err(io.Error failure): {
+            return Option<GRV_lang.Lang>.None;
+        }
+        case Ok(str text): {
+            match (GRV_grammar.load(text)) {
+                case Err(str reason): {
+                    return Option<GRV_lang.Lang>.None;
+                }
+                case Ok(GRV_grammar.Grammar grammar): {
+                    return Option<GRV_lang.Lang>.Some(GRV_lang.build(grammar));
+                }
+            }
+        }
+    }
+}
+
+void inspect(GRV_check.Check check, str language, int forks_at_most) {
+    match (lang_of(language)) {
+        case None: {
+            check.ok(language + ": load", false);
+        }
+        case Some(GRV_lang.Lang lang): {
+            check.ok(language + ": symbols and productions", !lang.is_failed && lang.prod_lhs.size() > 0);
+            GRV_lr.Table first = GRV_lr.build(lang);
+            GRV_lr.Table second = GRV_lr.build(lang);
+            check.ok(language + ": tables build", !first.is_failed);
+            check.eq_int(language + ": the build is repeatable (states)", first.state_count(), second.state_count());
+            check.eq_int(language + ": the build is repeatable (entries)", first.entries.size(), second.entries.size());
+            check.ok(language + ": forks within bound", first.forks <= forks_at_most);
+            check.ok(language + ": state 0 has actions", first.state_off[1] > first.state_off[0]);
+            // every state's run is sorted by symbol
+            bool is_sorted = true;
+            for (int state in 0 .. first.state_count()) {
+                for (int cursor in first.state_off[state] + 1 .. first.state_off[state + 1]) {
+                    if (first.entries[cursor] < first.entries[cursor - 1]) {
+                        is_sorted = false;
+                    }
+                }
+            }
+            check.ok(language + ": runs sorted", is_sorted);
+        }
+    }
+}
+
+inspect(check, "json", 0);
+inspect(check, "lua", 8);
+inspect(check, "c", 60);
+check.finish();
