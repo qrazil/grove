@@ -1,0 +1,8 @@
+helix files 86 lines 4247
+  per file kind: {'folds.scm': 2, 'highlights.scm': 22, 'indents.scm': 15, 'injections.scm': 19, 'locals.scm': 7, 'tags.scm': 5, 'textobjects.scm': 16}
+  predicates: {'#set!': 77, '#match?': 50, '#eq?': 23, '#any-of?': 13, '#not-same-line?': 12, '#not-kind-eq?': 10, '#strip!': 2, '#set-adjacent!': 2, '#not-one-line?': 1}
+  structures: {'alternation [': 289, 'wildcard (_)': 107, 'anchor .': 93, 'field:': 245, 'negated !field': 2, 'quantified + * ?': 170, '(ERROR': 7, 'MISSING': 0, 'supertype/sub': 0, 'private @_x': 64}
+nvim-treesitter files 99 lines 7116
+  per file kind: {'folds.scm': 21, 'highlights.scm': 23, 'indents.scm': 17, 'injections.scm': 22, 'locals.scm': 16}
+  predicates: {'#set!': 205, '#lua-match?': 74, '#eq?': 65, '#any-of?': 57, '#offset!': 13, '#has-ancestor?': 6, '#not-has-parent?': 3, '#not-kind-eq?': 3, '#match?': 3, '#trim!': 3, '#not-has-ancestor?': 1, '#has-parent?': 1, '#contains?': 1, '#not-any-of?': 1, '#downcase!': 1, '#set-lang-from-info-string!': 1}
+  structures: {'alternation [': 419, 'wildcard (_)': 71, 'anchor .': 152, 'field:': 470, 'negated !field': 0, 'quantified + * ?': 233, '(ERROR': 15, 'MISSING': 0, 'supertype/sub': 0, 'private @_x': 203}
