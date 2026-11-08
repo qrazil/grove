@@ -1,6 +1,6 @@
 # grove: specification and feasibility study
 
-Status: **design with a working g1**, version 0.1.0. Written first as a design
+Status: **design with a working g1 and g2**, version 0.2.0. Written first as a design
 (0.0.1); section 14 records what g1 built and measured, and where it changed the
 design. Decisions of the owner (2026-11-09): all recommendations of
 `QUESTIONS.md` approved, with `treesitter_maxfile` defaulting to **5 MB** (plus a
@@ -851,7 +851,7 @@ cheap for grove.
 
 ### 9.2 Mechanism: a resumable state machine
 
-`Parser.step(budget_ns) -> StepResult { Done, Yielded }`. The parse state is
+`Parser.has_finished_after(budget_ns) -> StepResult { Done, Yielded }`. The parse state is
 explicit (stack versions, lookahead cache, reusable-node cursor, lexer position,
 progress counters); `step` runs until the budget is spent, checking the clock
 every 100 operations (tree-sitter checks every 100: `OP_COUNT_PER_PARSER_TIMEOUT_CHECK
@@ -990,7 +990,7 @@ committed so CI does not need nvim.
 |---|---|---|
 | **g0** loader + lexer | `GRV_json`, `GRV_grammar` (all 16 rule types, extras, conflicts, externals, inline, supertypes, word, precedences), regex dialect to code-point NFA/DFA with `\p` tables, lexer with valid-set DFAs, pattern fixtures from the 23 grammars | all 23 grammar.json files load; every PATTERN compiles (no `R_FAIL`); the **token stream** of the json grammar over its fixtures equals tree-sitter's leaf list; load time recorded. *Partly done: JSON reader, loader, matcher over bytes, in the repo.* |
 | **g1** parser, small grammars | LR(0)+LALR lookahead tables, conflict resolution by precedence, GLR stack with one/few versions, `Tree` arena, reductions with fields/aliases/hidden nodes, ERROR = stop; json, toml (no scanner; needs 2 of its 5 externals) then lua | exact oracle equality on json, lua, diff fixtures; table build time and table size recorded for json, lua, toml, css, c |
-| **g2** incremental + cooperative | edit, subtree reuse, `step(budget)`, line table, changed ranges, balancing, panic-mode recovery, anonymous-node dump, table cache | the incremental-equals-scratch property over seeded edit scripts on all g1 languages; 1-char edit and slicing numbers on a 1 MB json; fuzz suite green |
+| **g2** incremental + cooperative | edit, subtree reuse, `has_finished_after(budget)`, line table, changed ranges, balancing, panic-mode recovery, anonymous-node dump, table cache | the incremental-equals-scratch property over seeded edit scripts on all g1 languages; 1-char edit and slicing numbers on a 1 MB json; fuzz suite green |
 | **g3** queries | Q0, then Q1 (lua-match, offsets, locals) | captures equal nvim's on highlights fixtures for json/lua/c; textobjects/folds/indents run on Helix/nvim files |
 | **g4** the first real language | c (no scanner, 8 conflicts, 1 466 states, the biggest no-scanner target) then cpp's table, then javascript with its scanner port, python, rust | c exact on >= 90% of fixtures; the table build/time budget confirmed or the cache plan upgraded; MISSING and version competition added; first numbers in `docs/PERF.md` |
 | **g5** m3 integration | `GRV_med.Backend`, `pump`, document versions, highlights/objects/folds/indent/injections/selection, large-file fallback, option `treesitter_maxfile` | m3 runs with grove as the first backend for c and json; the screen tests of m3 still pass; no key-path stall measured by m3's UX-PERF harness |
@@ -1051,7 +1051,7 @@ commands are in `tests/tables.m31` and `tests/bench.m31`, the recorded output in
 - c, real files: of 90 sampled sources and headers (`/usr/include`, the kernel
   tools tree) tree-sitter parses 21 without ERROR; grove's tree is identical on
   **9 of those 21**. The 12 others are listed in
-  `experiments/results/c_real_files.txt`. They are not random bugs: 9 are a
+  `experiments/results/c_many_files.txt` (section 15.3 has the current numbers). They are not random bugs: 9 are a
   parse failure on a construct whose GLR resolution differs from tree-sitter's
   (`__BEGIN_DECLS` followed by `typedef`, `goto done;` before `case`, a call
   statement after declarations, `__extension__`, a lone `}` inside `#ifdef`), 1 is
@@ -1157,3 +1157,90 @@ Error recovery (a failure leaves `root = -1` and `error_at`), external scanners,
 incremental reuse, queries, anonymous nodes in the dump, `MISSING`, dynamic
 precedence beyond picking the highest sum among finished versions, version merging
 beyond equal (state, parent), named-precedence ordering across lists.
+
+## 15. g2 results (version 0.2.0)
+
+g2 is built: the tree of section 5 (relative padding and size, immutable nodes,
+versions that share subtrees), the edit of section 4.2, reuse with tree-sitter's
+conditions, resumable parsing, a first error recovery and the many-file oracle. All
+numbers were measured on this machine, m31 v0.14.2, `cc -O2`, one core
+(`tests/bench.m31`, `experiments/results/g2_bench.txt`).
+
+### 15.1 The tree and the edit
+
+- `GRV_tree`: `padding`, `size`, `lookahead`, `production`, `flags`, children in one flat
+  list, `repeat_depth` for repeat nodes. A node is an int; there is no parent link;
+  absolute positions are sums along the path. `full()` dumps every node (symbol
+  ids, byte ranges, the extra mark, repeat nodes flattened); two trees of the same text
+  are the same exactly when `full()` is equal.
+- **Repeats are kept shallow.** A list read as `aux -> aux aux` is left-leaning: 1 600
+  items made a tree 800 deep, and an edit copied 429 nodes. The parser now appends an
+  item to the right subtree while it is shallower than the left one (a binary counter),
+  so the depth is 10 for 200 items, 12 for 400, 13 for 800, 15 for 1 600, and an edit
+  copies 24 to 29 nodes. (tree-sitter does a similar rebalancing after the fact.)
+- `GRV_edit.apply(tree, start, old_end, new_end)` copies the path to the edit and
+  marks it changed; a node is touched when the range meets its padding or body or the
+  window its shape depended on (`lookahead`: what its last token's lexer looked at and
+  the token the parser had read when it reduced it). The new root shares everything
+  else; the old root is still a valid tree. `compact()` copies what is reachable
+  into a fresh tree (1.41M nodes to 1.36M after ten edits on the 1.7 MB JSON file,
+  in 0.3 s).
+
+### 15.2 Reuse, slicing, recovery
+
+- **Reuse** (`GRV_glr.Parser`): with one version, a node of the old tree that starts
+  at the parser's position is pushed whole if it is unchanged, not fragile (built
+  while there were several versions or from a state with several actions), has no
+  ERROR, the table's action on its first token is one SHIFT (then it needs a goto
+  for the node's symbol) or one REDUCE (the reduction is done first, as a lexed token
+  would ask, and the node is looked at again), and the lexer, run in the current
+  state, gives that first token again. The reduce-first rule matters: without it the
+  parser fell back to single items after the first reused chunk of a list (18 000
+  tokens lexed per edit); with it 63.
+- **Slicing**: `Parser.has_finished_after(budget_ns)` runs rounds until the time is spent
+  (the clock is read every 8 rounds) and returns whether the tree is complete; the next
+  call continues. `has_finished_after(0)` stops after 8 rounds, which is what the
+  tests use (no clock involved).
+- **Errors**: when every version is stuck the parser looks at most 16 entries down for
+  a state that accepts the token, wraps what lies above it in an ERROR node (an extra,
+  so the stack stays valid), otherwise wraps the token and goes on; at the end of
+  input everything is one ERROR. The tree always has a root. The nodes above an ERROR
+  are marked and never reused. No MISSING tokens and no version cost comparison yet
+  (SPEC 8.2 steps 3 and 4).
+
+### 15.3 Measured
+
+| | 1.7 MB JSON (1.4M nodes) | 608 KB C (410k nodes) |
+|---|--:|--:|
+| parse from scratch | 0.9 to 1.0 s | 0.30 to 0.34 s |
+| `apply` of one edit (mid-file) | 18 to 23 us | 14 to 18 us |
+| reparse after one inserted space, mid-file | **72 to 90 us**, 63 tokens lexed, 18 nodes reused | **64 to 84 us**, 48 tokens, 18 nodes |
+| nodes copied per edit | 32 | 27 |
+| worst reparse of 10 | 124 us | 153 us |
+| tree-sitter, same kind of edit (nvim, SPEC 3.2) | 15.6 ms | 22.7 ms |
+
+An edit that leaves the syntax alone costs about 0.1 ms whatever the file size, and it
+needs no slicing. An edit that changes the lexical context of the rest of the file
+(an opened string or block comment) still re-reads until the context closes: the
+hostile edits of `tests/t_incr.m31` do that, and the result equals a scratch parse.
+
+The many-file oracle (`tests/oracle/report.sh`, nothing committed but the reports):
+
+| language | files compared | identical | different | skipped (tree-sitter reports errors) |
+|---|--:|--:|--:|--:|
+| json | 1 000 (<= 300 KB) | **990** | 0 | 10 |
+| c | 400 (<= 60 KB) | 136 | 66 | 198 |
+
+All 990 clean JSON files are node-for-node identical, ranges and fields included. The
+66 C differences are the fidelity gap of section 14.4 item 6 (mostly "the tree has
+errors": a construct on which grove's GLR resolution differs from tree-sitter's).
+
+### 15.4 Tests (all independent of the clock)
+
+`t_incr`: for json and c, 80 hostile random edits and 60 benign ones each, a
+fixed-seed generator: the incremental tree must equal the scratch tree
+(`full()` and the error flag), nodes must be reused, and benign edits must read
+under a third of the tokens of scratch parses (a ratio of counts). `t_recover`:
+slicing with a zero budget gives the same tree as one go; recovery keeps what
+surrounds an error; 150 random texts per grammar always finish with a root that
+covers the input. `compact` keeps the tree.

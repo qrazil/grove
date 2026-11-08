@@ -54,3 +54,15 @@ Same machine and toolchain as above. Full numbers and the reading in
 | GLR parse, 1.7 MB generated JSON | 1.08 s (1.6 MB/s); tree-sitter in nvim 0.34 s |
 | GLR parse, 608 KB C | 0.39 s |
 | lexer DFA states built lazily | 49 (JSON file), 279 (C file) |
+
+## grove g2 (0.2.0): incremental
+
+`experiments/results/g2_bench.txt`; reading in `docs/SPEC.md` 15.3.
+
+| what | JSON 1.7 MB | C 608 KB |
+|---|--:|--:|
+| reparse after one inserted space, mid-file | 72 to 90 us | 64 to 84 us |
+| edit applied to the tree | 18 to 23 us | 14 to 18 us |
+| nodes copied / reused / tokens lexed per edit | 32 / 18 / 63 | 27 / 18 / 48 |
+| compaction of the arena | 0.3 s | 0.13 s |
+| 990 JSON files vs tree-sitter | identical | |

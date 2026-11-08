@@ -1,0 +1,200 @@
+grove vs tree-sitter, up to 400 C sources/headers (<= 60 KB) under /usr/include and the kernel tools tree, chosen by a hash of the path
+DIFF  /usr/include/unicode/unorm.h line 1
+     ours: !!!! /usr/include/unicode/unorm.h: the tree has errors
+     want: (translation_unit	0-21042
+DIFF  /usr/include/drm/omap_drm.h line 1
+     ours: !!!! /usr/include/drm/omap_drm.h: the tree has errors
+     want: (translation_unit	0-4027
+DIFF  /usr/include/lzma/filter.h line 1
+     ours: !!!! /usr/include/lzma/filter.h: the tree has errors
+     want: (translation_unit	0-31746
+DIFF  /usr/include/bits/argp-ldbl.h line 1
+     ours: !!!! /usr/include/bits/argp-ldbl.h: the tree has errors
+     want: (translation_unit	0-1010
+DIFF  /usr/include/termcap.h line 1
+     ours: !!!! /usr/include/termcap.h: the tree has errors
+     want: (translation_unit	0-3471
+DIFF  /usr/include/glib-2.0/gobject/gobject-autocleanups.h line 1
+     ours: !!!! /usr/include/glib-2.0/gobject/gobject-autocleanups.h: the tree has errors
+     want: (translation_unit	0-1484
+DIFF  /usr/include/xcb/xprint.h line 1
+     ours: !!!! /usr/include/xcb/xprint.h: the tree has errors
+     want: (translation_unit	0-57343
+DIFF  /usr/include/python3.12/bytearrayobject.h line 1
+     ours: !!!! /usr/include/python3.12/bytearrayobject.h: the tree has errors
+     want: (translation_unit	0-1466
+DIFF  /usr/include/xcb/xcb.h line 1
+     ours: !!!! /usr/include/xcb/xcb.h: the tree has errors
+     want: (translation_unit	0-22326
+DIFF  /usr/include/python3.12/cpython/pytime.h line 1
+     ours: !!!! /usr/include/python3.12/cpython/pytime.h: the tree has errors
+     want: (translation_unit	0-12402
+DIFF  /usr/include/python3.12/internal/pycore_object_state.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_object_state.h: the tree has errors
+     want: (translation_unit	0-1016
+DIFF  /usr/include/bits/err-ldbl.h line 1
+     ours: !!!! /usr/include/bits/err-ldbl.h: the tree has errors
+     want: (translation_unit	0-1148
+DIFF  /usr/include/xcb/shape.h line 1
+     ours: !!!! /usr/include/xcb/shape.h: the tree has errors
+     want: (translation_unit	0-20806
+DIFF  /usr/include/bits/syslog-ldbl.h line 1
+     ours: !!!! /usr/include/bits/syslog-ldbl.h: the tree has errors
+     want: (translation_unit	0-1204
+DIFF  /usr/include/xcb/xinerama.h line 1
+     ours: !!!! /usr/include/xcb/xinerama.h: the tree has errors
+     want: (translation_unit	0-14955
+DIFF  /usr/include/python3.12/internal/pycore_pyarena.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_pyarena.h: the tree has errors
+     want: (translation_unit	0-2733
+DIFF  /usr/include/unicode/urep.h line 1
+     ours: !!!! /usr/include/unicode/urep.h: the tree has errors
+     want: (translation_unit	0-5507
+DIFF  /usr/include/glib-2.0/gio/giotypes.h line 1
+     ours: !!!! /usr/include/glib-2.0/gio/giotypes.h: the tree has errors
+     want: (translation_unit	0-23214
+DIFF  /usr/include/freetype2/freetype/config/mac-support.h line 5
+     ours:     (preproc_def	590-630
+     want:     (preproc_def	590-856
+DIFF  /usr/include/sys/un.h line 1
+     ours: !!!! /usr/include/sys/un.h: the tree has errors
+     want: (translation_unit	0-1498
+DIFF  /usr/include/netipx/ipx.h line 1
+     ours: !!!! /usr/include/netipx/ipx.h: the tree has errors
+     want: (translation_unit	0-2900
+DIFF  /usr/include/python3.12/cpython/initconfig.h line 1
+     ours: !!!! /usr/include/python3.12/cpython/initconfig.h: the tree has errors
+     want: (translation_unit	0-7820
+DIFF  /usr/include/sepol/policydb/services.h line 1
+     ours: !!!! /usr/include/sepol/policydb/services.h: the tree has errors
+     want: (translation_unit	1-8676
+DIFF  /usr/include/drm/qxl_drm.h line 1
+     ours: !!!! /usr/include/drm/qxl_drm.h: the tree has errors
+     want: (translation_unit	0-4131
+DIFF  /usr/include/netinet/in_systm.h line 1
+     ours: !!!! /usr/include/netinet/in_systm.h: the tree has errors
+     want: (translation_unit	0-1494
+DIFF  /usr/include/python3.12/internal/pycore_long.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_long.h: the tree has errors
+     want: (translation_unit	0-7805
+DIFF  /usr/include/freetype2/freetype/ftbitmap.h line 1
+     ours: !!!! /usr/include/freetype2/freetype/ftbitmap.h: the tree has errors
+     want: (translation_unit	0-9051
+DIFF  /usr/include/asm/svm.h line 355
+     ours:       value: (preproc_arg	4586-4724))
+     want:       (comment	4586-4613)
+DIFF  /usr/include/python3.12/internal/pycore_obmalloc.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_obmalloc.h: the tree has errors
+     want: (translation_unit	0-27284
+DIFF  /usr/include/freetype2/freetype/ftotval.h line 1
+     ours: !!!! /usr/include/freetype2/freetype/ftotval.h: the tree has errors
+     want: (translation_unit	0-5346
+DIFF  /usr/include/openssl/fipskey.h line 1
+     ours: !!!! /usr/include/openssl/fipskey.h: the tree has errors
+     want: (translation_unit	0-1010
+DIFF  /usr/include/freetype2/freetype/ttnameid.h line 1
+     ours: !!!! /usr/include/freetype2/freetype/ttnameid.h: the tree has errors
+     want: (translation_unit	0-58769
+DIFF  /usr/include/bits/select-decl.h line 1
+     ours: !!!! /usr/include/bits/select-decl.h: the tree has errors
+     want: (translation_unit	0-1234
+DIFF  /usr/include/openssl/thread.h line 1
+     ours: !!!! /usr/include/openssl/thread.h: the tree has errors
+     want: (translation_unit	0-871
+DIFF  /usr/include/xcb/xtest.h line 1
+     ours: !!!! /usr/include/xcb/xtest.h: the tree has errors
+     want: (translation_unit	0-7589
+DIFF  /usr/include/openssl/fips.h line 1
+     ours: !!!! /usr/include/openssl/fips.h: the tree has errors
+     want: (translation_unit	0-601
+DIFF  /usr/include/python3.12/internal/pycore_namespace.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_namespace.h: the tree has errors
+     want: (translation_unit	0-392
+DIFF  /usr/include/python3.12/internal/pycore_strhex.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_strhex.h: the tree has errors
+     want: (translation_unit	0-937
+DIFF  /usr/include/sepol/boolean_record.h line 1
+     ours: !!!! /usr/include/sepol/boolean_record.h: the tree has errors
+     want: (translation_unit	0-1551
+DIFF  /usr/include/python3.12/traceback.h line 1
+     ours: !!!! /usr/include/python3.12/traceback.h: the tree has errors
+     want: (translation_unit	0-585
+DIFF  /usr/include/sepol/policydb/flask_types.h line 1
+     ours: !!!! /usr/include/sepol/policydb/flask_types.h: the tree has errors
+     want: (translation_unit	0-1586
+DIFF  /usr/include/xcb/record.h line 1
+     ours: !!!! /usr/include/xcb/record.h: the tree has errors
+     want: (translation_unit	0-27966
+DIFF  /usr/include/bits/shm.h line 1
+     ours: !!!! /usr/include/bits/shm.h: the tree has errors
+     want: (translation_unit	0-2766
+DIFF  /usr/include/linux/scc.h line 212
+     ours:           type: (sized_type_specifier	3097-3110
+     want:           type: (sized_type_specifier	3097-3101)
+DIFF  /usr/include/python3.12/pythread.h line 1
+     ours: !!!! /usr/include/python3.12/pythread.h: the tree has errors
+     want: (translation_unit	0-4875
+DIFF  /usr/include/asm-generic/shmbuf.h line 48
+     ours:               type: (sized_type_specifier	1171-1200
+     want:               type: (sized_type_specifier	1171-1184)
+DIFF  /usr/include/drm/vgem_drm.h line 1
+     ours: !!!! /usr/include/drm/vgem_drm.h: the tree has errors
+     want: (translation_unit	0-1971
+DIFF  /usr/include/freetype2/freetype/config/public-macros.h line 1
+     ours: !!!! /usr/include/freetype2/freetype/config/public-macros.h: the tree has errors
+     want: (translation_unit	0-4207
+DIFF  /usr/include/drm/panfrost_drm.h line 1
+     ours: !!!! /usr/include/drm/panfrost_drm.h: the tree has errors
+     want: (translation_unit	0-8579
+DIFF  /usr/include/python3.12/internal/pycore_runtime_init.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_runtime_init.h: the tree has errors
+     want: (translation_unit	0-5912
+DIFF  /usr/include/drm/exynos_drm.h line 1
+     ours: !!!! /usr/include/drm/exynos_drm.h: the tree has errors
+     want: (translation_unit	0-11133
+DIFF  /usr/include/freetype2/freetype/ftwinfnt.h line 1
+     ours: !!!! /usr/include/freetype2/freetype/ftwinfnt.h: the tree has errors
+     want: (translation_unit	0-7965
+DIFF  /usr/include/glib-2.0/gio/gnativevolumemonitor.h line 1
+     ours: !!!! /usr/include/glib-2.0/gio/gnativevolumemonitor.h: the tree has errors
+     want: (translation_unit	0-2318
+DIFF  /usr/include/selinux/get_default_type.h line 1
+     ours: !!!! /usr/include/selinux/get_default_type.h: the tree has errors
+     want: (translation_unit	0-643
+DIFF  /usr/include/sepol/policydb/mls_types.h line 1
+     ours: !!!! /usr/include/sepol/policydb/mls_types.h: the tree has errors
+     want: (translation_unit	0-5156
+DIFF  /usr/include/sepol/policydb/link.h line 1
+     ours: !!!! /usr/include/sepol/policydb/link.h: the tree has errors
+     want: (translation_unit	0-517
+DIFF  /usr/include/X11/extensions/XKBproto.h line 1
+     ours: !!!! /usr/include/X11/extensions/XKBproto.h: the tree has errors
+     want: (translation_unit	0-29172
+DIFF  /usr/include/python3.12/internal/pycore_floatobject.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_floatobject.h: the tree has errors
+     want: (translation_unit	0-1578
+DIFF  /usr/include/graphite2/Types.h line 93
+     ours:         (preproc_def	2322-2339
+     want:         (preproc_def	2322-2386
+DIFF  /usr/include/python3.12/pyconfig-64.h line 2253
+     ours:         value: (preproc_arg	55739-55774))))
+     want:         (comment	55739-55774))))
+DIFF  /usr/include/python3.12/internal/pycore_call.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_call.h: the tree has errors
+     want: (translation_unit	0-3920
+DIFF  /usr/include/python3.12/internal/pycore_blocks_output_buffer.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_blocks_output_buffer.h: the tree has errors
+     want: (translation_unit	0-8688
+DIFF  /usr/include/python3.12/internal/pycore_warnings.h line 1
+     ours: !!!! /usr/include/python3.12/internal/pycore_warnings.h: the tree has errors
+     want: (translation_unit	0-740
+DIFF  /usr/include/X11/Xfuncproto.h line 265
+     ours:           value: (preproc_arg	4393-4407))))
+     want:           (comment	4393-4407))))
+DIFF  /usr/include/harfbuzz/hb.h line 1
+     ours: !!!! /usr/include/harfbuzz/hb.h: the tree has errors
+     want: (translation_unit	0-1555
+DIFF  /usr/include/python3.12/pytypedefs.h line 1
+     ours: !!!! /usr/include/python3.12/pytypedefs.h: the tree has errors
+     want: (translation_unit	0-851
+136 identical, 66 different, 198 skipped (tree-sitter reports errors)

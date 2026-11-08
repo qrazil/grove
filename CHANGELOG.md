@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0 (g2: incremental, resumable, recovering)
+
+- `GRV_tree`: relative padding and size, lookahead window, immutable nodes that
+  versions share, flags (extra, changed, fragile, error), balanced repeat nodes,
+  `full()` for exact comparison, `compact()`.
+- `GRV_edit`: `apply(tree, start, old_end, new_end)` copies the path to an edit and marks it.
+- `GRV_glr`: `Parser` with `has_finished_after(budget_ns)` (resumable), reuse of unchanged
+  subtrees by tree-sitter's conditions (reduce first when the first token asks for it),
+  error recovery (ERROR nodes, skipped tokens, whole-input ERROR at the end), `begin`,
+  `parse`, `reparse`. A parse now always has a root; `Tree.has_errors()` replaces the
+  failure position.
+- `GRV_lexer` reports how far it looked (`token_examined`); `GRV_lang` has an ERROR symbol.
+- Tests: `t_incr` (incremental equals scratch on random edits, reuse ratio), `t_recover`
+  (slicing, recovery, fuzz); `tests/oracle/report.sh` compares any number of real files
+  (990 of 990 clean JSON files identical).
+- Measured: reparse after one edit in a 1.7 MB JSON file 72 to 90 us (tree-sitter in nvim
+  15 ms); parse 1.6 to 1.9 MB/s.
+- Renamed: `Parser.step` is `has_finished_after`; `Tree.start/stop` are gone (relative
+  positions), `Tree.node_symbol`, `padding`, `size` replace them.
+
 ## 0.1.0 (g1: tables and parser)
 
 - `GRV_lang`: grammar.json rules to symbols and productions (cross product of

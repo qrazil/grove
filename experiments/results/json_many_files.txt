@@ -1,0 +1,2 @@
+grove vs tree-sitter (nvim, json.so of the same revision), 1000 JSON files under ~/.nvm ~/.config ~/.local/share/nvim ~/homelab/apps /usr/share /usr/lib/python3.12, <= 300 KB, chosen by a hash of the path
+990 identical, 0 different, 10 skipped (tree-sitter reports errors)
