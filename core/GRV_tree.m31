@@ -1,0 +1,119 @@
+/* The syntax tree: nodes in parallel integer lists, children in one flat list.
+ * A node is an int. Tokens have production -1. `flags` bit 0 marks an extra
+ * (a comment, met between the children a production names).
+ *
+ * This is the g1 form, with absolute byte offsets; the incremental form
+ * (relative padding and size, immutable versions) replaces it at g2 behind the
+ * same dump. */
+
+import core.GRV_lang;
+
+pub type Tree {
+    pub GRV_lang.Lang lang;
+    pub List<int> node_symbol = [];
+    pub List<int> start = [];
+    pub List<int> stop = [];
+    pub List<int> prod = [];
+    pub List<int> flags = [];
+    pub List<int> kid_at = [];
+    pub List<int> kid_count = [];
+    pub List<int> kids = [];
+    pub int root = -1;
+    pub int error_at = -1;
+}
+
+pub int Tree.add_token(int symbol, int from, int end_at, bool is_extra) {
+    node_symbol.push(symbol);
+    start.push(from);
+    stop.push(end_at);
+    prod.push(-1);
+    int extra_flag = 0;
+    if (is_extra) {
+        extra_flag = 1;
+    }
+    flags.push(extra_flag);
+    kid_at.push(0);
+    kid_count.push(0);
+    return node_symbol.size() - 1;
+}
+
+pub int Tree.add_node(int symbol, int production, List<int> children, int position, bool is_extra) {
+    node_symbol.push(symbol);
+    int from = position;
+    int end_at = position;
+    if (children.size() > 0) {
+        from = start[children[0]];
+        end_at = stop[children[children.size() - 1]];
+    }
+    start.push(from);
+    stop.push(end_at);
+    prod.push(production);
+    int extra_flag = 0;
+    if (is_extra) {
+        extra_flag = 1;
+    }
+    flags.push(extra_flag);
+    kid_at.push(kids.size());
+    kid_count.push(children.size());
+    for (int child in children) {
+        kids.push(child);
+    }
+    return node_symbol.size() - 1;
+}
+
+pub bool Tree.is_extra(int node) {
+    return flags[node] == 1;
+}
+
+// print the visible named descendants of `parent`, as the oracle script does
+void Tree.emit(int parent, int depth, int inherited, List<str> lines) {
+    GRV_lang.Lang language = lang;
+    int production = prod[parent];
+    int child_number = 0;
+    for (int child_index in 0 .. kid_count[parent]) {
+        int kid = kids[kid_at[parent] + child_index];
+        int field = -1;
+        int alias = -1;
+        if (!is_extra(kid) && production >= 0) {
+            field = language.step_field[language.prod_start[production] + child_number];
+            alias = language.step_alias[language.prod_start[production] + child_number];
+            child_number = child_number + 1;
+        }
+        int use_field = inherited;
+        if (field >= 0) {
+            use_field = field;
+        }
+        bool is_visible = language.is_visible(node_symbol[kid]);
+        bool is_named = language.is_named(node_symbol[kid]);
+        str name = language.symbol_name[node_symbol[kid]];
+        if (alias >= 0) {
+            is_visible = true;
+            is_named = alias % 2 == 1;
+            name = language.grammar.strings[alias / 2];
+        }
+        if (is_visible && is_named) {
+            line(kid, depth, use_field, name, lines);
+            emit(kid, depth + 1, -1, lines);
+            lines[lines.size() - 1] = lines[lines.size() - 1] + ")";
+        } else if (!is_visible) {
+            emit(kid, depth, use_field, lines);
+        }
+    }
+}
+
+void Tree.line(int node, int depth, int field, str name, List<str> lines) {
+    str text = "  ".repeat(depth);
+    if (field >= 0) {
+        text = text + lang.field_names[field] + ": ";
+    }
+    lines.push(text + "(" + name + "\t" + str(start[node]) + "-" + str(stop[node]));
+}
+
+/// The named nodes, one per line, indented, with field names and byte ranges: the format of tests/oracle/dump_sexp.lua.
+pub str Tree.sexp() {
+    List<str> lines = [];
+    line(root, 0, -1, lang.symbol_name[node_symbol[root]], lines);
+    emit(root, 1, -1, lines);
+    lines[lines.size() - 1] = lines[lines.size() - 1] + ")";
+    return lines.join("\n");
+}

@@ -41,6 +41,10 @@ pub type Grammar {
     pub List<int> extras = [];
     pub List<str> externals = [];
     pub Map<str, int> rule_index = {};
+    pub List<int> inline_rules = [];
+    pub List<int> supertypes = [];
+    pub List<List<str>> precedence_lists = [];
+    pub str word = "";
 }
 
 int Grammar.node(int node_kind, int argument, int content) {
@@ -112,6 +116,7 @@ int Grammar.lower(GRV_json.Doc doc, int json_node) {
         return -1;
     }
     int argument = 0;
+    bool is_name = false;
     if (type_kind == FIELD) {
         argument = intern(doc.text(doc.member(json_node, "name")));
     } else if (type_kind == ALIAS) {
@@ -122,12 +127,16 @@ int Grammar.lower(GRV_json.Doc doc, int json_node) {
             argument = doc.value[precedence];
         } else {
             argument = intern(doc.text(precedence));
+            is_name = true;
         }
     }
     int self = node(type_kind, argument, content);
     if (type_kind == ALIAS) {
         int is_named = doc.member(json_node, "named");
         flag[self] = doc.value[is_named];
+    }
+    if (is_name) {
+        flag[self] = 1;
     }
     return self;
 }
@@ -141,6 +150,25 @@ pub int Grammar.count(int type_kind) {
         }
     }
     return total;
+}
+
+// the rule indices named by the array member `key` of the top-level object
+void Grammar.read_names(GRV_json.Doc doc, str key, List<int> out) {
+    int list_node = doc.member(0, key);
+    if (list_node < 0) {
+        return;
+    }
+    int entry_node = doc.first[list_node];
+    while (entry_node >= 0) {
+        match (rule_index.get(doc.text(entry_node))) {
+            case Some(int rule): {
+                out.push(rule);
+            }
+            case None: {
+            }
+        }
+        entry_node = doc.next[entry_node];
+    }
 }
 
 int kind_of(str type_name) {
@@ -204,6 +232,32 @@ pub Result<Grammar, str> load(str text) {
                     }
                     grammar.extras.push(lowered);
                     x = doc.next[x];
+                }
+            }
+            grammar.read_names(doc, "inline", grammar.inline_rules);
+            grammar.read_names(doc, "supertypes", grammar.supertypes);
+            int word_node = doc.member(0, "word");
+            if (word_node >= 0) {
+                grammar.word = doc.text(word_node);
+            }
+            int lists = doc.member(0, "precedences");
+            if (lists >= 0) {
+                int one = doc.first[lists];
+                while (one >= 0) {
+                    List<str> names = [];
+                    int entry_node = doc.first[one];
+                    while (entry_node >= 0) {
+                        int text_node = doc.member(entry_node, "value");
+                        if (text_node < 0) {
+                            text_node = doc.member(entry_node, "name");
+                        }
+                        if (text_node >= 0) {
+                            names.push(doc.text(text_node));
+                        }
+                        entry_node = doc.next[entry_node];
+                    }
+                    grammar.precedence_lists.push(names);
+                    one = doc.next[one];
                 }
             }
             return Result<Grammar, str>.Ok(grammar);

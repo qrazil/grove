@@ -1,0 +1,733 @@
+/* LR(1) parse tables, merged where merging is safe, with tree-sitter-style
+ * conflict resolution.
+ *
+ * 1. states are kernels of items `production * 64 + dot`, each item with a
+ *    lookahead set, built from the start state outward;
+ * 2. a new state with the same core as an existing one is merged into it only
+ *    if that creates no conflict neither state had (Pager's idea, tested
+ *    directly on the reduce and shift sets); otherwise it stays separate. Plain
+ *    LALR merging was tried first and parsed `a = b = c` wrongly in C: a
+ *    spurious reduce/shift conflict, resolved by precedence, killed the shift;
+ * 3. actions: shift, reduce, accept, goto. A shift/reduce or reduce/reduce
+ *    conflict is resolved by static precedence and associativity; what it
+ *    cannot resolve stays as several actions on the same lookahead, and the
+ *    parser forks there (GLR). tree-sitter only allows that for conflicts the
+ *    grammar declares in `conflicts`; this generator keeps every unresolved one
+ *    (`forks` counts them) and does not check the declaration.
+ *
+ * Extra rules that are non-terminals (a comment made of several tokens) are
+ * added to every state's closure with every terminal as lookahead, and their
+ * goto is the state itself.
+ *
+ * A table entry is one int, `symbol * 2^24 + action`, sorted, so a lookup is a
+ * binary search over a state's run; action = `argument * 4 + kind`. */
+
+import core.GRV_lang;
+
+pub const int SHIFT = 0;
+pub const int REDUCE = 1;
+pub const int ACCEPT = 2;
+pub const int GOTO = 3;
+pub const int ACTION_SPAN = 16777216;
+const int ITEM_SPAN = 64;
+const int WORD_BITS = 62;
+
+pub type Table {
+    pub GRV_lang.Lang lang;
+    pub int width = 1;
+    pub List<int> state_off = [];
+    pub List<int> entries = [];
+    pub List<int> valid_id = [];
+    pub List<List<int>> valid_sets = [];
+    pub int forks = 0;
+    pub int resolved = 0;
+    pub bool is_failed = false;
+    pub str error_text = "";
+}
+
+pub int Table.state_count() {
+    return state_off.size() - 1;
+}
+
+/// The range [from, to) of `entries` holding the actions of `state` on `symbol`.
+pub int Table.find(int state, int symbol) {
+    int low_index = state_off[state];
+    int high_index = state_off[state + 1];
+    int want = symbol * ACTION_SPAN;
+    while (low_index < high_index) {
+        int mid = (low_index + high_index) / 2;
+        if (entries[mid] < want) {
+            low_index = mid + 1;
+        } else {
+            high_index = mid;
+        }
+    }
+    return low_index;
+}
+
+// ---------------------------------------------------------------- bit sets
+
+bool did_merge_bits(List<int> destination, int destination_at, List<int> source, int source_at, int width) {
+    bool did_change = false;
+    for (int i in 0 .. width) {
+        int merged = destination[destination_at + i] | source[source_at + i];
+        if (merged != destination[destination_at + i]) {
+            destination[destination_at + i] = merged;
+            did_change = true;
+        }
+    }
+    return did_change;
+}
+
+bool did_set_bit(List<int> destination, int cursor, int bit) {
+    int index = cursor + bit / WORD_BITS;
+    int mask = 1 << (bit % WORD_BITS);
+    if (destination[index] & mask != 0) {
+        return false;
+    }
+    destination[index] = destination[index] | mask;
+    return true;
+}
+
+bool has_bit(List<int> source, int cursor, int bit) {
+    return source[cursor + bit / WORD_BITS] & (1 << (bit % WORD_BITS)) != 0;
+}
+
+// ---------------------------------------------------------------- generator
+
+type Gen {
+    GRV_lang.Lang lang;
+    Table table;
+    int width = 1;
+    int term_count = 0;
+    List<List<int>> prods_of = [];
+    List<int> nullable = [];
+    List<int> first = [];
+    List<List<int>> kernel = [];
+    List<List<int>> look = [];
+    List<List<int>> edge_symbol = [];
+    List<List<int>> edge_to = [];
+    Map<str, List<int>> cores = {};
+    Map<str, List<int>> core_shifts = {};
+    Map<str, List<int>> core_empties = {};
+    List<List<int>> conflicts_of = [];
+    List<int> mark = [];
+    int epoch = 0;
+    List<int> scratch = [];
+    bool is_scratch_nullable = false;
+    int accept_prod = 0;
+}
+
+int Gen.nonterminal_index(int symbol) {
+    return symbol - term_count;
+}
+
+// FIRST of the symbols of production `prod` from step `from`; into scratch, sets is_scratch_nullable
+void Gen.first_after(int prod, int from) {
+    for (int i in 0 .. width) {
+        scratch[i] = 0;
+    }
+    is_scratch_nullable = true;
+    int start = lang.prod_start[prod];
+    for (int step in from .. lang.prod_length[prod]) {
+        int symbol = lang.step_symbol[start + step];
+        if (symbol < term_count) {
+            did_set_bit(scratch, 0, symbol);
+            is_scratch_nullable = false;
+            return;
+        }
+        did_merge_bits(scratch, 0, first, nonterminal_index(symbol) * width, width);
+        if (nullable[nonterminal_index(symbol)] == 0) {
+            is_scratch_nullable = false;
+            return;
+        }
+    }
+}
+
+void Gen.compute_first() {
+    int nts = lang.symbol_name.size() - term_count;
+    for (int i in 0 .. nts * width) {
+        first.push(0);
+    }
+    for (int i in 0 .. nts) {
+        nullable.push(0);
+    }
+    bool did_change = true;
+    while (did_change) {
+        did_change = false;
+        for (int prod in 0 .. lang.prod_lhs.size()) {
+            int lhs = nonterminal_index(lang.prod_lhs[prod]);
+            first_after(prod, 0);
+            if (did_merge_bits(first, lhs * width, scratch, 0, width)) {
+                did_change = true;
+            }
+            if (is_scratch_nullable && nullable[lhs] == 0) {
+                nullable[lhs] = 1;
+                did_change = true;
+            }
+        }
+    }
+}
+
+// the non-terminals reachable from the kernel's next symbols (and the extra rules)
+List<int> Gen.closure_nts(List<int> items) {
+    epoch = epoch + 1;
+    List<int> out = [];
+    List<int> stack = [];
+    for (int item in items) {
+        int prod = item / ITEM_SPAN;
+        int dot = item % ITEM_SPAN;
+        if (dot < lang.prod_length[prod]) {
+            stack.push(lang.step_symbol[lang.prod_start[prod] + dot]);
+        }
+    }
+    for (int extra in lang.extra_nts) {
+        stack.push(extra);
+    }
+    while (stack.size() > 0) {
+        int symbol = stack.pop();
+        if (symbol < term_count || mark[symbol] == epoch) {
+            continue;
+        }
+        mark[symbol] = epoch;
+        out.push(symbol);
+        for (int prod in prods_of[symbol]) {
+            if (lang.prod_length[prod] > 0) {
+                stack.push(lang.step_symbol[lang.prod_start[prod]]);
+            }
+        }
+    }
+    return out;
+}
+
+// lookaheads of the non-terminals of the closure of the kernel `items` with lookaheads `lk`, flat nts * width
+List<int> Gen.closure_look(List<int> items, List<int> lookaheads) {
+    int nts = lang.symbol_name.size() - term_count;
+    List<int> ahead = [];
+    for (int i in 0 .. nts * width) {
+        ahead.push(0);
+    }
+    List<int> queue = closure_nts(items);
+    for (int extra in lang.extra_nts) {
+        for (int term in 0 .. term_count) {
+            did_set_bit(ahead, nonterminal_index(extra) * width, term);
+        }
+    }
+    for (int item_index in 0 .. items.size()) {
+        int prod = items[item_index] / ITEM_SPAN;
+        int dot = items[item_index] % ITEM_SPAN;
+        if (dot < lang.prod_length[prod]) {
+            int symbol = lang.step_symbol[lang.prod_start[prod] + dot];
+            if (symbol >= term_count) {
+                first_after(prod, dot + 1);
+                bool did_add = did_merge_bits(ahead, nonterminal_index(symbol) * width, scratch, 0, width);
+                if (is_scratch_nullable && did_merge_bits(ahead, nonterminal_index(symbol) * width, lookaheads, item_index * width, width)) {
+                    did_add = true;
+                }
+                if (did_add) {
+                    queue.push(symbol);
+                }
+            }
+        }
+    }
+    while (queue.size() > 0) {
+        int lhs = queue.pop();
+        for (int prod in prods_of[lhs]) {
+            if (lang.prod_length[prod] == 0) {
+                continue;
+            }
+            int symbol = lang.step_symbol[lang.prod_start[prod]];
+            if (symbol < term_count) {
+                continue;
+            }
+            first_after(prod, 1);
+            bool did_add = did_merge_bits(ahead, nonterminal_index(symbol) * width, scratch, 0, width);
+            if (is_scratch_nullable && did_merge_bits(ahead, nonterminal_index(symbol) * width, ahead, nonterminal_index(lhs) * width, width)) {
+                did_add = true;
+            }
+            if (did_add) {
+                queue.push(symbol);
+            }
+        }
+    }
+    return ahead;
+}
+
+/* Per core (the kernel items without lookaheads): the terminals shifted from the
+ * kernel and closure items, and the empty productions of the closure. */
+void Gen.core_info(str core_key, List<int> items) {
+    if (core_shifts.contains(core_key)) {
+        return;
+    }
+    List<int> shifts = [];
+    for (int i in 0 .. width) {
+        shifts.push(0);
+    }
+    List<int> empties = [];
+    List<int> all_items = [];
+    for (int item in items) {
+        all_items.push(item);
+    }
+    for (int symbol in closure_nts(items)) {
+        for (int prod in prods_of[symbol]) {
+            all_items.push(prod * ITEM_SPAN);
+            if (lang.prod_length[prod] == 0) {
+                empties.push(prod);
+            }
+        }
+    }
+    for (int item in all_items) {
+        int prod = item / ITEM_SPAN;
+        int dot = item % ITEM_SPAN;
+        if (dot < lang.prod_length[prod]) {
+            int symbol = lang.step_symbol[lang.prod_start[prod] + dot];
+            if (symbol < term_count) {
+                did_set_bit(shifts, 0, symbol);
+            }
+        }
+    }
+    core_shifts.set(core_key, shifts);
+    core_empties.set(core_key, empties);
+}
+
+// the terminals on which this state would have a conflict between reduces, or a reduce and a shift
+List<int> Gen.conflict_bits(str core_key, List<int> items, List<int> lookaheads) {
+    List<int> out = [];
+    List<int> seen = [];
+    List<int> piece = [];
+    for (int i in 0 .. width) {
+        out.push(0);
+        seen.push(0);
+        piece.push(0);
+    }
+    for (int item_index in 0 .. items.size()) {
+        int prod = items[item_index] / ITEM_SPAN;
+        if (items[item_index] % ITEM_SPAN == lang.prod_length[prod]) {
+            for (int i in 0 .. width) {
+                piece[i] = seen[i] & lookaheads[item_index * width + i];
+                out[i] = out[i] | piece[i];
+                seen[i] = seen[i] | lookaheads[item_index * width + i];
+            }
+        }
+    }
+    List<int> empties = core_empties.get(core_key).or([]);
+    if (empties.size() > 0) {
+        List<int> ahead = closure_look(items, lookaheads);
+        for (int prod in empties) {
+            int base = nonterminal_index(lang.prod_lhs[prod]) * width;
+            for (int i in 0 .. width) {
+                piece[i] = seen[i] & ahead[base + i];
+                out[i] = out[i] | piece[i];
+                seen[i] = seen[i] | ahead[base + i];
+            }
+        }
+    }
+    List<int> shifts = core_shifts.get(core_key).or(seen);
+    for (int i in 0 .. width) {
+        out[i] = out[i] | (seen[i] & shifts[i]);
+    }
+    return out;
+}
+
+// would merging lookaheads `fresh` into state `old` give either a conflict it did not have
+bool Gen.can_merge(int old, str core_key, List<int> fresh) {
+    List<int> items = kernel[old];
+    List<int> merged = look[old].slice(0, look[old].size());
+    for (int i in 0 .. merged.size()) {
+        merged[i] = merged[i] | fresh[i];
+    }
+    if (conflicts_of[old].size() == 0) {
+        conflicts_of[old] = conflict_bits(core_key, items, look[old]);
+    }
+    List<int> fresh_conflicts = conflict_bits(core_key, items, fresh);
+    List<int> merged_conflicts = conflict_bits(core_key, items, merged);
+    for (int i in 0 .. width) {
+        if (merged_conflicts[i] & ~(conflicts_of[old][i] & fresh_conflicts[i]) != 0) {
+            return false;
+        }
+    }
+    conflicts_of[old] = merged_conflicts;
+    return true;
+}
+
+// the state with kernel `items` and lookaheads `lk`: an existing compatible one, or a new one
+int Gen.state_for(List<int> items, List<int> lookaheads, List<int> queue, List<bool> is_queued) {
+    str core_key = item_key(items);
+    List<int> candidates = cores.get(core_key).or([]);
+    for (int candidate in candidates) {
+        bool is_subset = true;
+        for (int i in 0 .. lookaheads.size()) {
+            if (lookaheads[i] & ~look[candidate][i] != 0) {
+                is_subset = false;
+            }
+        }
+        if (is_subset) {
+            return candidate;
+        }
+        if (can_merge(candidate, core_key, lookaheads)) {
+            did_merge_bits(look[candidate], 0, lookaheads, 0, lookaheads.size());
+            if (!is_queued[candidate]) {
+                is_queued[candidate] = true;
+                queue.push(candidate);
+            }
+            return candidate;
+        }
+    }
+    int id = kernel.size();
+    kernel.push(items);
+    look.push(lookaheads);
+    edge_symbol.push([]);
+    edge_to.push([]);
+    conflicts_of.push([]);
+    is_queued.push(true);
+    queue.push(id);
+    candidates.push(id);
+    cores.set(core_key, candidates);
+    core_info(core_key, items);
+    return id;
+}
+
+void Gen.build_lr1() {
+    List<int> queue = [];
+    List<bool> is_queued = [];
+    List<int> start_look = [];
+    for (int i in 0 .. width) {
+        start_look.push(0);
+    }
+    did_set_bit(start_look, 0, 0);
+    state_for([accept_prod * ITEM_SPAN], start_look, queue, is_queued);
+    while (queue.size() > 0) {
+        int state = queue.pop();
+        is_queued[state] = false;
+        List<int> items = kernel[state];
+        List<int> lookaheads = look[state];
+        List<int> ahead = closure_look(items, lookaheads);
+        Map<int, int> bucket_of = {};
+        List<int> bucket_syms = [];
+        List<List<int>> bucket_items = [];
+        List<List<int>> bucket_look = [];
+        for (int item_index in 0 .. items.size()) {
+            int prod = items[item_index] / ITEM_SPAN;
+            int dot = items[item_index] % ITEM_SPAN;
+            if (dot < lang.prod_length[prod]) {
+                int symbol = lang.step_symbol[lang.prod_start[prod] + dot];
+                int slot = bucket_of.get(symbol).or(-1);
+                if (slot < 0) {
+                    slot = bucket_items.size();
+                    bucket_of.set(symbol, slot);
+                    bucket_syms.push(symbol);
+                    bucket_items.push([]);
+                    bucket_look.push([]);
+                }
+                bucket_items[slot].push(items[item_index] + 1);
+                for (int i in 0 .. width) {
+                    bucket_look[slot].push(lookaheads[item_index * width + i]);
+                }
+            }
+        }
+        for (int symbol in closure_nts(items)) {
+            for (int prod in prods_of[symbol]) {
+                if (lang.prod_length[prod] > 0) {
+                    int first_symbol = lang.step_symbol[lang.prod_start[prod]];
+                    int slot = bucket_of.get(first_symbol).or(-1);
+                    if (slot < 0) {
+                        slot = bucket_items.size();
+                        bucket_of.set(first_symbol, slot);
+                        bucket_syms.push(first_symbol);
+                        bucket_items.push([]);
+                        bucket_look.push([]);
+                    }
+                    bucket_items[slot].push(prod * ITEM_SPAN + 1);
+                    for (int i in 0 .. width) {
+                        bucket_look[slot].push(ahead[nonterminal_index(symbol) * width + i]);
+                    }
+                }
+            }
+        }
+        edge_symbol[state] = [];
+        edge_to[state] = [];
+        for (int slot in 0 .. bucket_items.size()) {
+            List<int> order = [];
+            for (int item_index in 0 .. bucket_items[slot].size()) {
+                order.push(bucket_items[slot][item_index] * 1048576 + item_index);
+            }
+            order.sort();
+            List<int> sorted_items = [];
+            List<int> sorted_look = [];
+            for (int packed in order) {
+                int item_index = packed % 1048576;
+                sorted_items.push(bucket_items[slot][item_index]);
+                for (int i in 0 .. width) {
+                    sorted_look.push(bucket_look[slot][item_index * width + i]);
+                }
+            }
+            int target = state_for(sorted_items, sorted_look, queue, is_queued);
+            edge_symbol[state].push(bucket_syms[slot]);
+            edge_to[state].push(target);
+        }
+        for (int extra in lang.extra_nts) {
+            edge_symbol[state].push(extra);
+            edge_to[state].push(state);
+        }
+    }
+}
+
+bool Gen.is_name(int value) {
+    return value <= -1000000000;
+}
+
+// > 0 if a binds tighter than b, < 0 if looser, 0 if equal or incomparable
+int Gen.compare_precedence(int left, int right) {
+    if (left == right) {
+        return 0;
+    }
+    if (is_name(left) && is_name(right)) {
+        int list_left = lang.prec_list_of.get(left).or(-1);
+        int list_right = lang.prec_list_of.get(right).or(-2);
+        if (list_left == list_right) {
+            return lang.prec_position_of.get(right).or(0) - lang.prec_position_of.get(left).or(0);
+        }
+        return 0;
+    }
+    if (is_name(left) || is_name(right)) {
+        return 0;
+    }
+    if (left > right) {
+        return 1;
+    }
+    return -1;
+}
+
+// the actions that survive for one lookahead, as packed action ints
+List<int> Gen.resolve(int shift_to, int shift_prec, List<int> reduces) {
+    List<int> alive = [];
+    for (int i in 0 .. reduces.size()) {
+        int prod = reduces[i];
+        int prec = 0;
+        if (lang.prod_length[prod] > 0) {
+            prec = lang.step_prec[lang.prod_start[prod] + lang.prod_length[prod] - 1];
+        }
+        bool is_beaten = false;
+        for (int j in 0 .. reduces.size()) {
+            int other = reduces[j];
+            if (other != prod && lang.prod_length[other] > 0) {
+                int other_prec = lang.step_prec[lang.prod_start[other] + lang.prod_length[other] - 1];
+                if (compare_precedence(other_prec, prec) > 0) {
+                    is_beaten = true;
+                }
+            }
+        }
+        if (!is_beaten) {
+            alive.push(prod);
+        }
+    }
+    bool is_shift_alive = shift_to >= 0;
+    List<int> kept = [];
+    for (int prod in alive) {
+        int prec = 0;
+        int assoc = GRV_lang.ASSOC_NONE;
+        if (lang.prod_length[prod] > 0) {
+            int last = lang.prod_start[prod] + lang.prod_length[prod] - 1;
+            prec = lang.step_prec[last];
+            assoc = lang.step_assoc[last];
+        }
+        if (shift_to >= 0) {
+            int order = compare_precedence(prec, shift_prec);
+            if (order > 0 || (order == 0 && assoc == GRV_lang.ASSOC_LEFT)) {
+                is_shift_alive = false;
+                kept.push(prod);
+            } else if (order < 0 || (order == 0 && assoc == GRV_lang.ASSOC_RIGHT)) {
+                table.resolved = table.resolved + 1;
+            } else {
+                // a repeat's `aux -> aux aux` is ambiguous by construction: reduce, so the stack stays shallow
+                if (lang.has_flag(lang.prod_lhs[prod], GRV_lang.F_AUX)) {
+                    is_shift_alive = false;
+                }
+                kept.push(prod);
+            }
+        } else {
+            kept.push(prod);
+        }
+    }
+    List<int> out = [];
+    if (is_shift_alive) {
+        out.push(shift_to * 4 + SHIFT);
+    }
+    for (int prod in kept) {
+        out.push(prod * 4 + REDUCE);
+    }
+    return out;
+}
+
+void Gen.build_actions() {
+    int states = kernel.size();
+    table.state_off.push(0);
+    Map<str, int> valid_index = {};
+    for (int state in 0 .. states) {
+        List<int> ahead = closure_look(kernel[state], look[state]);
+        List<int> items = kernel[state];
+        List<int> nts = closure_nts(items);
+        Map<int, int> shift_to = {};
+        Map<int, int> shift_prec = {};
+        Map<int, List<int>> reduces = {};
+        List<int> terms = [];
+        List<int> packed = [];
+        Map<int, int> edge_map = {};
+        for (int edge in 0 .. edge_symbol[state].size()) {
+            int symbol = edge_symbol[state][edge];
+            edge_map.set(symbol, edge_to[state][edge]);
+            if (symbol >= term_count) {
+                packed.push(symbol * ACTION_SPAN + edge_to[state][edge] * 4 + GOTO);
+            }
+        }
+        // shifts: every item with a terminal after the dot, kernel or closure
+        List<int> shifters = [];
+        for (int item in items) {
+            shifters.push(item);
+        }
+        for (int symbol in nts) {
+            for (int prod in prods_of[symbol]) {
+                shifters.push(prod * ITEM_SPAN);
+            }
+        }
+        for (int item in shifters) {
+            int prod = item / ITEM_SPAN;
+            int dot = item % ITEM_SPAN;
+            if (dot < lang.prod_length[prod]) {
+                int cursor = lang.prod_start[prod] + dot;
+                int symbol = lang.step_symbol[cursor];
+                if (symbol < term_count) {
+                    int target = edge_map.get(symbol).or(-1);
+                    if (!shift_to.contains(symbol)) {
+                        terms.push(symbol);
+                        shift_to.set(symbol, target);
+                        shift_prec.set(symbol, lang.step_prec[cursor]);
+                    } else if (lang.step_prec[cursor] > shift_prec.get(symbol).or(0)) {
+                        shift_prec.set(symbol, lang.step_prec[cursor]);
+                    }
+                }
+            }
+        }
+        // reduces: complete kernel items with their lookaheads, and empty productions of the closure
+        for (int item_index in 0 .. items.size()) {
+            int prod = items[item_index] / ITEM_SPAN;
+            int dot = items[item_index] % ITEM_SPAN;
+            if (dot == lang.prod_length[prod]) {
+                for (int term in 0 .. term_count) {
+                    if (has_bit(look[state], item_index * width, term)) {
+                        if (prod == accept_prod) {
+                            packed.push(term * ACTION_SPAN + ACCEPT);
+                        } else {
+                            add_reduce(reduces, terms, shift_to, term, prod);
+                        }
+                    }
+                }
+            }
+        }
+        for (int symbol in nts) {
+            for (int prod in prods_of[symbol]) {
+                if (lang.prod_length[prod] == 0) {
+                    for (int term in 0 .. term_count) {
+                        if (has_bit(ahead, nonterminal_index(symbol) * width, term)) {
+                            add_reduce(reduces, terms, shift_to, term, prod);
+                        }
+                    }
+                }
+            }
+        }
+        for (int term in terms) {
+            List<int> chosen = resolve(shift_to.get(term).or(-1), shift_prec.get(term).or(0), reduces.get(term).or([]));
+            if (chosen.size() > 1) {
+                table.forks = table.forks + 1;
+            }
+            for (int action in chosen) {
+                packed.push(term * ACTION_SPAN + action);
+            }
+        }
+        packed.sort();
+        List<int> valid = [];
+        int last_term = -1;
+        for (int entry in packed) {
+            int term = entry / ACTION_SPAN;
+            if (term < term_count && term != last_term && term != 0) {
+                valid.push(term);
+                last_term = term;
+            }
+        }
+        for (int term in 1 .. term_count) {
+            if (lang.has_flag(term, GRV_lang.F_EXTRA) && !valid.contains(term)) {
+                valid.push(term);
+            }
+        }
+        valid.sort();
+        str valid_key = item_key(valid);
+        int valid_slot = valid_index.get(valid_key).or(-1);
+        if (valid_slot < 0) {
+            valid_slot = table.valid_sets.size();
+            valid_index.set(valid_key, valid_slot);
+            table.valid_sets.push(valid);
+        }
+        table.valid_id.push(valid_slot);
+        for (int entry in packed) {
+            table.entries.push(entry);
+        }
+        table.state_off.push(table.entries.size());
+    }
+}
+
+void Gen.add_reduce(Map<int, List<int>> reduces, List<int> terms, Map<int, int> shift_to, int term, int prod) {
+    if (!reduces.contains(term)) {
+        reduces.set(term, []);
+        if (!shift_to.contains(term)) {
+            terms.push(term);
+            shift_to.set(term, -1);
+        }
+    }
+    List<int> list = reduces.get(term).or([]);
+    if (!list.contains(prod)) {
+        list.push(prod);
+    }
+}
+
+str item_key(List<int> items) {
+    str out = "";
+    for (int item in items) {
+        out = out + str(item) + ",";
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------- precedence
+
+// ---------------------------------------------------------------- actions
+
+/// Build the parse tables of `lang`. `is_failed` / `error_text` say if it could not.
+pub Table build(GRV_lang.Lang lang) {
+    Table table = Table(lang);
+    int term_count = lang.term_count;
+    int width = (term_count + WORD_BITS - 1) / WORD_BITS;
+    table.width = width;
+    Gen gen = Gen(lang, table);
+    gen.width = width;
+    gen.term_count = term_count;
+    for (int i in 0 .. width) {
+        gen.scratch.push(0);
+    }
+    for (int symbol in 0 .. lang.symbol_name.size()) {
+        gen.prods_of.push([]);
+        gen.mark.push(0);
+    }
+    for (int prod in 0 .. lang.prod_lhs.size()) {
+        gen.prods_of[lang.prod_lhs[prod]].push(prod);
+        if (lang.prod_length[prod] >= ITEM_SPAN - 1) {
+            table.is_failed = true;
+            table.error_text = "a production has " + str(lang.prod_length[prod]) + " steps";
+            return table;
+        }
+    }
+    gen.accept_prod = gen.prods_of[lang.accept_symbol][0];
+    gen.compute_first();
+    gen.build_lr1();
+    gen.build_actions();
+    return table;
+}

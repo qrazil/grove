@@ -1,0 +1,547 @@
+/* From grammar.json's rules to symbols and productions: what the table
+ * generator consumes.
+ *
+ * Symbols are integers. Terminals come first: 0 is the end of input, then one
+ * per distinct STRING / PATTERN / TOKEN in order of first appearance (a rule
+ * whose whole body is a token names its terminal), then one per external
+ * token. Non-terminals follow: one per rule (except token rules and inlined
+ * rules), then the auxiliary repeat rules, then `$accept`.
+ *
+ * A production is a run of steps; a step is (symbol, field, alias, precedence,
+ * associativity). CHOICE and SEQ are flattened by cross product, REPEAT into an
+ * auxiliary rule `aux -> aux aux | x`, `inline` rules are substituted.
+ * Precedence is per step (every step inside a PREC carries it), as in
+ * tree-sitter's flattening [recalled, checked by the oracle]. */
+
+import core.GRV_grammar;
+
+pub const int F_VISIBLE = 1;
+pub const int F_NAMED = 2;
+pub const int F_TERMINAL = 4;
+pub const int F_EXTRA = 8;
+pub const int F_SKIP = 16;
+pub const int F_IMMEDIATE = 32;
+pub const int F_STRING = 64;
+pub const int F_AUX = 128;
+pub const int F_EXTERNAL = 256;
+pub const int ASSOC_NONE = 0;
+pub const int ASSOC_LEFT = 1;
+pub const int ASSOC_RIGHT = 2;
+const int MAX_ALTERNATIVES = 20000;
+const int STRIDE = 5;
+const int NAME_PRECEDENCE = 1000000000;
+
+pub type Lang {
+    pub GRV_grammar.Grammar grammar;
+    pub List<str> symbol_name = [];
+    pub List<int> symbol_flags = [];
+    pub List<int> symbol_prec = [];
+    pub List<int> symbol_root = [];
+    pub int term_count = 1;
+    pub List<int> prod_lhs = [];
+    pub List<int> prod_start = [];
+    pub List<int> prod_length = [];
+    pub List<int> prod_dyn = [];
+    pub List<int> step_symbol = [];
+    pub List<int> step_field = [];
+    pub List<int> step_alias = [];
+    pub List<int> step_prec = [];
+    pub List<int> step_assoc = [];
+    pub List<str> field_names = [];
+    pub List<int> rule_symbol = [];
+    pub int accept_symbol = 0;
+    pub int external_base = 0;
+    pub List<int> extra_nts = [];
+    pub Map<int, int> prec_list_of = {};
+    pub Map<int, int> prec_position_of = {};
+    pub ErrorText error_text = ErrorText();
+    Map<str, int> terminal_ids = {};
+    Map<str, int> aux_ids = {};
+    Map<str, bool> seen_productions = {};
+    Map<int, str> node_keys = {};
+    Map<str, int> field_ids = {};
+    Map<str, int> precedence_ids = {};
+    List<bool> is_inlined = [];
+    pub bool is_failed = false;
+    int aux_count = 0;
+}
+
+pub bool Lang.is_terminal(int symbol) {
+    return symbol < term_count;
+}
+
+pub bool Lang.is_visible(int symbol) {
+    return symbol_flags[symbol] % 2 == 1;
+}
+
+pub bool Lang.is_named(int symbol) {
+    return (symbol_flags[symbol] / 2) % 2 == 1;
+}
+
+pub bool Lang.has_flag(int symbol, int flag) {
+    return (symbol_flags[symbol] / flag) % 2 == 1;
+}
+
+void Lang.fail(str message) {
+    if (!is_failed) {
+        error_text.text = message;
+    }
+    is_failed = true;
+}
+
+str Lang.key(int node) {
+    match (node_keys.get(node)) {
+        case Some(str known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    int type_kind = grammar.kind[node];
+    str out = "(" + str(type_kind);
+    if (type_kind == GRV_grammar.STRING || type_kind == GRV_grammar.PATTERN) {
+        out = out + " " + grammar.strings[grammar.arg[node]];
+    } else if (type_kind == GRV_grammar.SYMBOL) {
+        out = out + " " + str(grammar.arg[node]);
+    } else if (type_kind == GRV_grammar.FIELD || type_kind == GRV_grammar.ALIAS) {
+        out = out + " " + str(grammar.arg[node]) + "/" + str(grammar.flag[node]);
+    } else if (type_kind >= GRV_grammar.PREC) {
+        out = out + " " + str(grammar.arg[node]) + "/" + str(grammar.flag[node]);
+    }
+    int child = grammar.first[node];
+    while (child >= 0) {
+        out = out + " " + key(child);
+        child = grammar.next[child];
+    }
+    out = out + ")";
+    node_keys.set(node, out);
+    return out;
+}
+
+bool Lang.is_token_kind(int type_kind) {
+    return type_kind == GRV_grammar.STRING || type_kind == GRV_grammar.PATTERN || type_kind == GRV_grammar.TOKEN || type_kind == GRV_grammar.IMMEDIATE_TOKEN;
+}
+
+// the token node a rule body is, once PREC wrappers are stripped; -1 if it is not a bare token
+int Lang.token_core(int body) {
+    int current = body;
+    while (grammar.kind[current] >= GRV_grammar.PREC) {
+        current = grammar.first[current];
+    }
+    if (is_token_kind(grammar.kind[current])) {
+        return current;
+    }
+    return -1;
+}
+
+int Lang.precedence_value(int node) {
+    if (grammar.flag[node] == 1) {
+        str name = grammar.strings[grammar.arg[node]];
+        match (precedence_ids.get(name)) {
+            case Some(int known): {
+                return known;
+            }
+            case None: {
+                int id = -(NAME_PRECEDENCE + precedence_ids.size());
+                precedence_ids.set(name, id);
+                return id;
+            }
+        }
+    }
+    return grammar.arg[node];
+}
+
+int Lang.add_symbol(str name, int flags, int lex_prec, int root) {
+    symbol_name.push(name);
+    symbol_flags.push(flags);
+    symbol_prec.push(lex_prec);
+    symbol_root.push(root);
+    return symbol_name.size() - 1;
+}
+
+// the lexical precedence a token node carries (PREC directly inside TOKEN, or around it)
+int Lang.lex_precedence(int outer, int core) {
+    int result = 0;
+    int current = outer;
+    while (current != core && grammar.kind[current] >= GRV_grammar.PREC) {
+        if (grammar.kind[current] != GRV_grammar.PREC_DYNAMIC) {
+            result = precedence_value(current);
+        }
+        current = grammar.first[current];
+    }
+    if (grammar.kind[core] == GRV_grammar.TOKEN || grammar.kind[core] == GRV_grammar.IMMEDIATE_TOKEN) {
+        current = grammar.first[core];
+        while (grammar.kind[current] >= GRV_grammar.PREC) {
+            if (grammar.kind[current] != GRV_grammar.PREC_DYNAMIC) {
+                result = precedence_value(current);
+            }
+            current = grammar.first[current];
+        }
+    }
+    return result;
+}
+
+// the terminal id of token node `core` (registering it); `rule_name` names it if the whole rule is that token
+int Lang.terminal(int outer, int core, str rule_name) {
+    int type_kind = grammar.kind[core];
+    str token_key = key(core);
+    match (terminal_ids.get(token_key)) {
+        case Some(int known): {
+            if (rule_name != "" && !is_named(known)) {
+                symbol_name[known] = rule_name;
+                int upgraded = symbol_flags[known] - symbol_flags[known] % 4 + F_NAMED;
+                if (!rule_name.starts_with("_")) {
+                    upgraded = upgraded + F_VISIBLE;
+                }
+                symbol_flags[known] = upgraded;
+            }
+            return known;
+        }
+        case None: {
+        }
+    }
+    int flags = F_TERMINAL;
+    str name = rule_name;
+    if (rule_name != "") {
+        flags = flags + F_NAMED;
+        if (!rule_name.starts_with("_")) {
+            flags = flags + F_VISIBLE;
+        }
+    } else if (type_kind == GRV_grammar.STRING) {
+        flags = flags + F_VISIBLE;
+        name = grammar.strings[grammar.arg[core]];
+    } else {
+        name = "token" + str(symbol_name.size());
+    }
+    if (type_kind == GRV_grammar.STRING) {
+        flags = flags + F_STRING;
+    }
+    if (type_kind == GRV_grammar.IMMEDIATE_TOKEN) {
+        flags = flags + F_IMMEDIATE;
+    }
+    int id = add_symbol(name, flags, lex_precedence(outer, core), core);
+    terminal_ids.set(token_key, id);
+    return id;
+}
+
+void Lang.collect(int node) {
+    int type_kind = grammar.kind[node];
+    if (is_token_kind(type_kind)) {
+        terminal(node, node, "");
+        return;
+    }
+    if (type_kind == GRV_grammar.SEQ || type_kind == GRV_grammar.CHOICE) {
+        int member = grammar.first[node];
+        while (member >= 0) {
+            collect(member);
+            member = grammar.next[member];
+        }
+    } else if (type_kind >= GRV_grammar.REPEAT) {
+        collect(grammar.first[node]);
+    }
+}
+
+/* An alternative is [dynamic precedence, then STRIDE ints per step]:
+ * symbol, field, alias, precedence, associativity. */
+List<List<int>> Lang.single(int symbol, int field, int alias, int prec, int assoc) {
+    return [[0, symbol, field, alias, prec, assoc]];
+}
+
+List<List<int>> Lang.cross(List<List<int>> left, List<List<int>> right) {
+    List<List<int>> out = [];
+    for (List<int> first_alt in left) {
+        for (List<int> second_alt in right) {
+            List<int> joined = first_alt.slice(0, first_alt.size());
+            int dyn = first_alt[0];
+            if (second_alt[0] * second_alt[0] > dyn * dyn) {
+                dyn = second_alt[0];
+            }
+            joined[0] = dyn;
+            for (int i in 1 .. second_alt.size()) {
+                joined.push(second_alt[i]);
+            }
+            out.push(joined);
+            if (out.size() > MAX_ALTERNATIVES) {
+                fail("a rule flattens to more than " + str(MAX_ALTERNATIVES) + " alternatives");
+                return out;
+            }
+        }
+    }
+    return out;
+}
+
+int Lang.field_id(str name) {
+    match (field_ids.get(name)) {
+        case Some(int known): {
+            return known;
+        }
+        case None: {
+            field_names.push(name);
+            field_ids.set(name, field_names.size() - 1);
+            return field_names.size() - 1;
+        }
+    }
+}
+
+List<List<int>> Lang.alternatives(int node, int field, int alias, int prec, int assoc, int depth) {
+    if (depth > 200) {
+        fail("rules nest deeper than 200");
+        return [[0]];
+    }
+    int type_kind = grammar.kind[node];
+    if (type_kind == GRV_grammar.BLANK) {
+        return [[0]];
+    }
+    if (is_token_kind(type_kind)) {
+        return single(terminal(node, node, ""), field, alias, prec, assoc);
+    }
+    if (type_kind == GRV_grammar.SYMBOL) {
+        int target = grammar.arg[node];
+        if (target < 0) {
+            return single(external_base - target - 1, field, alias, prec, assoc);
+        }
+        if (is_inlined[target]) {
+            List<List<int>> inner = alternatives(grammar.rule_body[target], -1, -1, 0, 0, depth + 1);
+            apply_context(inner, field, alias, prec, assoc);
+            return inner;
+        }
+        return single(rule_symbol[target], field, alias, prec, assoc);
+    }
+    if (type_kind == GRV_grammar.SEQ) {
+        List<List<int>> out = [[0]];
+        int member = grammar.first[node];
+        while (member >= 0) {
+            out = cross(out, alternatives(member, field, alias, prec, assoc, depth + 1));
+            if (is_failed) {
+                return out;
+            }
+            member = grammar.next[member];
+        }
+        return out;
+    }
+    if (type_kind == GRV_grammar.CHOICE) {
+        List<List<int>> out = [];
+        int member = grammar.first[node];
+        while (member >= 0) {
+            for (List<int> alt in alternatives(member, field, alias, prec, assoc, depth + 1)) {
+                out.push(alt);
+            }
+            member = grammar.next[member];
+        }
+        return out;
+    }
+    if (type_kind == GRV_grammar.REPEAT || type_kind == GRV_grammar.REPEAT1) {
+        int aux = aux_symbol(grammar.first[node], depth);
+        List<List<int>> out = single(aux, field, alias, prec, assoc);
+        if (type_kind == GRV_grammar.REPEAT) {
+            out.push([0]);
+        }
+        return out;
+    }
+    if (type_kind == GRV_grammar.FIELD) {
+        return alternatives(grammar.first[node], field_id(grammar.strings[grammar.arg[node]]), alias, prec, assoc, depth + 1);
+    }
+    if (type_kind == GRV_grammar.ALIAS) {
+        return alternatives(grammar.first[node], field, grammar.arg[node] * 2 + grammar.flag[node], prec, assoc, depth + 1);
+    }
+    if (type_kind == GRV_grammar.PREC_DYNAMIC) {
+        List<List<int>> out = alternatives(grammar.first[node], field, alias, prec, assoc, depth + 1);
+        int value = grammar.arg[node];
+        for (int index in 0 .. out.size()) {
+            List<int> alt = out[index];
+            if (value * value > alt[0] * alt[0]) {
+                alt[0] = value;
+            }
+        }
+        return out;
+    }
+    int new_assoc = ASSOC_NONE;
+    if (type_kind == GRV_grammar.PREC_LEFT) {
+        new_assoc = ASSOC_LEFT;
+    } else if (type_kind == GRV_grammar.PREC_RIGHT) {
+        new_assoc = ASSOC_RIGHT;
+    }
+    return alternatives(grammar.first[node], field, alias, precedence_value(node), new_assoc, depth + 1);
+}
+
+int Lang.aux_symbol(int content, int depth) {
+    str token_key = key(content);
+    match (aux_ids.get(token_key)) {
+        case Some(int known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    aux_count = aux_count + 1;
+    int aux = add_symbol("aux_repeat" + str(aux_count), F_AUX, 0, -1);
+    aux_ids.set(token_key, aux);
+    List<List<int>> inner = alternatives(content, -1, -1, 0, 0, depth + 1);
+    for (List<int> alt in inner) {
+        add_production(aux, alt);
+    }
+    add_production(aux, [0, aux, -1, -1, 0, 0, aux, -1, -1, 0, 0]);
+    return aux;
+}
+
+void Lang.add_production(int lhs, List<int> alt) {
+    str signature = str(lhs);
+    for (int value in alt) {
+        signature = signature + "," + str(value);
+    }
+    match (seen_productions.get(signature)) {
+        case Some(bool known): {
+            return;
+        }
+        case None: {
+        }
+    }
+    seen_productions.set(signature, true);
+    prod_lhs.push(lhs);
+    prod_start.push(step_symbol.size());
+    prod_dyn.push(alt[0]);
+    int cursor = 1;
+    int count = 0;
+    while (cursor + STRIDE <= alt.size()) {
+        step_symbol.push(alt[cursor]);
+        step_field.push(alt[cursor + 1]);
+        step_alias.push(alt[cursor + 2]);
+        step_prec.push(alt[cursor + 3]);
+        step_assoc.push(alt[cursor + 4]);
+        cursor = cursor + STRIDE;
+        count = count + 1;
+    }
+    prod_length.push(count);
+}
+
+/// A holder so a failure can carry its message.
+pub type ErrorText {
+    pub str text = "";
+}
+
+// ----------------------------------------------------------------- keys
+
+// ----------------------------------------------------------------- terminals
+
+// ----------------------------------------------------------------- flattening
+
+// apply the reference's own metadata to the steps of an inlined rule that have none
+void apply_context(List<List<int>> alts, int field, int alias, int prec, int assoc) {
+    for (int index in 0 .. alts.size()) {
+        List<int> alt = alts[index];
+        int cursor = 1;
+        while (cursor + STRIDE <= alt.size()) {
+            if (alt[cursor + 1] < 0) {
+                alt[cursor + 1] = field;
+            }
+            if (alt[cursor + 2] < 0) {
+                alt[cursor + 2] = alias;
+            }
+            if (alt[cursor + 3] == 0 && prec != 0) {
+                alt[cursor + 3] = prec;
+                alt[cursor + 4] = assoc;
+            }
+            cursor = cursor + STRIDE;
+        }
+    }
+}
+
+// ----------------------------------------------------------------- entry
+
+/// Build the symbols and productions of `grammar`. Check `is_failed` / `error_text`.
+pub Lang build(GRV_grammar.Grammar grammar) {
+    Lang lang = Lang(grammar);
+    lang.add_symbol("end", 0, 0, -1);
+    lang.symbol_flags[0] = F_TERMINAL;
+    int rules = grammar.rule_name.size();
+    for (int rule in 0 .. rules) {
+        lang.is_inlined.push(grammar.inline_rules.contains(rule));
+    }
+    // terminals, in rule order; a rule that is a bare token names its terminal
+    for (int rule in 0 .. rules) {
+        int body = grammar.rule_body[rule];
+        int core = lang.token_core(body);
+        if (core >= 0 && !lang.is_inlined[rule]) {
+            int id = lang.terminal(body, core, grammar.rule_name[rule]);
+            if (lang.symbol_name[id] == grammar.rule_name[rule]) {
+                lang.rule_symbol.push(id);
+            } else {
+                lang.rule_symbol.push(-1);
+            }
+        } else {
+            lang.rule_symbol.push(-1);
+            lang.collect(body);
+        }
+    }
+    for (int extra in grammar.extras) {
+        lang.collect(extra);
+    }
+    // externals
+    lang.external_base = lang.symbol_name.size();
+    for (int i in 0 .. grammar.externals.size()) {
+        str name = grammar.externals[i];
+        int flags = F_TERMINAL + F_EXTERNAL;
+        if (name != "") {
+            flags = flags + F_NAMED;
+            if (!name.starts_with("_")) {
+                flags = flags + F_VISIBLE;
+            }
+        }
+        lang.add_symbol(name, flags, 0, -1);
+    }
+    lang.term_count = lang.symbol_name.size();
+    // non-terminals: one per rule that is not a token rule
+    for (int rule in 0 .. rules) {
+        if (lang.rule_symbol[rule] < 0 && !lang.is_inlined[rule]) {
+            int flags = F_NAMED;
+            if (!grammar.rule_name[rule].starts_with("_") && !grammar.supertypes.contains(rule)) {
+                flags = flags + F_VISIBLE;
+            }
+            lang.rule_symbol[rule] = lang.add_symbol(grammar.rule_name[rule], flags, 0, -1);
+        }
+    }
+    for (int rule in 0 .. rules) {
+        if (lang.rule_symbol[rule] >= lang.term_count) {
+            for (List<int> alt in lang.alternatives(grammar.rule_body[rule], -1, -1, 0, 0, 0)) {
+                lang.add_production(lang.rule_symbol[rule], alt);
+            }
+        } else if (lang.rule_symbol[rule] < 0 && !lang.is_inlined[rule]) {
+            lang.fail("rule has no symbol: " + grammar.rule_name[rule]);
+        }
+    }
+    // a bare-token rule whose terminal was already named by another rule becomes a non-terminal
+    lang.accept_symbol = lang.add_symbol("$accept", F_NAMED, 0, -1);
+    lang.add_production(lang.accept_symbol, [0, lang.rule_symbol[0], -1, -1, 0, 0]);
+    // extras
+    for (int extra in grammar.extras) {
+        int core = lang.token_core(extra);
+        int symbol = -1;
+        if (core >= 0) {
+            symbol = lang.terminal(extra, core, "");
+            if (lang.has_flag(symbol, F_NAMED) == false) {
+                lang.symbol_flags[symbol] = lang.symbol_flags[symbol] + F_SKIP;
+            }
+        } else if (grammar.kind[extra] == GRV_grammar.SYMBOL && grammar.arg[extra] >= 0) {
+            symbol = lang.rule_symbol[grammar.arg[extra]];
+        }
+        if (symbol < 0) {
+            lang.fail("an extra that is neither a token nor a rule");
+        } else if (!lang.has_flag(symbol, F_EXTRA)) {
+            lang.symbol_flags[symbol] = lang.symbol_flags[symbol] + F_EXTRA;
+            if (symbol >= lang.term_count) {
+                lang.extra_nts.push(symbol);
+            }
+        }
+    }
+    for (str name in lang.precedence_ids.keys()) {
+        int id = lang.precedence_ids.get(name).or(0);
+        for (int list_index in 0 .. grammar.precedence_lists.size()) {
+            int cursor = grammar.precedence_lists[list_index].index_of(name).or(-1);
+            if (cursor >= 0 && !lang.prec_list_of.contains(id)) {
+                lang.prec_list_of.set(id, list_index);
+                lang.prec_position_of.set(id, cursor);
+            }
+        }
+    }
+    return lang;
+}

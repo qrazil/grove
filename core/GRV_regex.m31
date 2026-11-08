@@ -1,0 +1,609 @@
+/* Lexical rules to a Thompson NFA over code points.
+ *
+ * A terminal's content (a STRING, a PATTERN, or a TOKEN tree of those) is
+ * compiled *backwards*: `compile(node, next)` returns the start state of a
+ * fragment that continues at `next`, so nothing is patched afterwards. Classes
+ * are sorted, merged range lists over 0 .. 0x10FFFF; a negated class is its
+ * complement.
+ *
+ * The regex dialect is the one the 23 grammars use (docs/SPEC.md 2.4): classes,
+ * \d \w \s and their negations, `.`, groups `( )` `(?: )`, `|`, `* + ? {n,m}`,
+ * escapes, \xHH \uHHHH \u{H..} and \p{..} \P{..}. No lookaround or backreference
+ * (no grammar has one); \b is accepted and never matches.
+ *
+ * Unicode properties are APPROXIMATIONS for now (see `property`): the six the
+ * grammars use are given as short range lists, exact for ASCII and the common
+ * blocks, not the full tables. The real tables are a g0 task of docs/SPEC.md. */
+
+import core.GRV_grammar;
+
+pub const int LAST_CODE_POINT = 1114111;
+pub const int N_CLASS = 0;
+pub const int N_SPLIT = 1;
+pub const int N_ACCEPT = 2;
+pub const int N_EPSILON = 3;
+pub const int N_RESTART = 4;
+const int A_CLASS = 0;
+const int A_SEQ = 1;
+const int A_ALT = 2;
+const int A_STAR = 3;
+const int A_PLUS = 4;
+const int A_OPT = 5;
+
+pub type Classes {
+    pub List<int> low = [];
+    pub List<int> high = [];
+    pub List<int> start = [];
+    pub List<int> count = [];
+}
+
+/// Add the class made of the pairs (lows[i], highs[i]); returns its id.
+pub int Classes.add(List<int> lows, List<int> highs, bool is_negated) {
+    List<int> packed = [];
+    for (int i in 0 .. lows.size()) {
+        packed.push(lows[i] * 2097152 + highs[i]);
+    }
+    packed.sort();
+    List<int> merged_low = [];
+    List<int> merged_high = [];
+    for (int pair in packed) {
+        int low_value = pair / 2097152;
+        int high_value = pair % 2097152;
+        int last = merged_low.size() - 1;
+        if (last >= 0 && low_value <= merged_high[last] + 1) {
+            if (high_value > merged_high[last]) {
+                merged_high[last] = high_value;
+            }
+        } else {
+            merged_low.push(low_value);
+            merged_high.push(high_value);
+        }
+    }
+    int id = start.size();
+    start.push(low.size());
+    int added = 0;
+    if (!is_negated) {
+        for (int i in 0 .. merged_low.size()) {
+            low.push(merged_low[i]);
+            high.push(merged_high[i]);
+            added = added + 1;
+        }
+    } else {
+        int next_low = 0;
+        for (int i in 0 .. merged_low.size()) {
+            if (merged_low[i] > next_low) {
+                low.push(next_low);
+                high.push(merged_low[i] - 1);
+                added = added + 1;
+            }
+            next_low = merged_high[i] + 1;
+        }
+        if (next_low <= LAST_CODE_POINT) {
+            low.push(next_low);
+            high.push(LAST_CODE_POINT);
+            added = added + 1;
+        }
+    }
+    count.push(added);
+    return id;
+}
+
+pub bool Classes.is_member(int id, int code_point) {
+    int from = start[id];
+    int low_value = 0;
+    int high_value = count[id] - 1;
+    while (low_value <= high_value) {
+        int mid = (low_value + high_value) / 2;
+        if (code_point < low[from + mid]) {
+            high_value = mid - 1;
+        } else if (code_point > high[from + mid]) {
+            low_value = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub type Nfa {
+    pub List<int> kind = [];
+    pub List<int> arg = [];
+    pub List<int> out1 = [];
+    pub List<int> out2 = [];
+    pub Classes classes = Classes();
+}
+
+pub int Nfa.state(int state_kind, int argument, int first_out, int second_out) {
+    kind.push(state_kind);
+    arg.push(argument);
+    out1.push(first_out);
+    out2.push(second_out);
+    return kind.size() - 1;
+}
+
+int Nfa.compile_ast(Ast tree, int node, int next) {
+    int type_kind = tree.kind[node];
+    if (type_kind == A_CLASS) {
+        return state(N_CLASS, tree.arg[node], next, -1);
+    }
+    if (type_kind == A_SEQ) {
+        int current = next;
+        int index = tree.members[node].size();
+        while (index > 0) {
+            index = index - 1;
+            current = compile_ast(tree, tree.members[node][index], current);
+        }
+        return current;
+    }
+    if (type_kind == A_ALT) {
+        int current = compile_ast(tree, tree.members[node][tree.members[node].size() - 1], next);
+        int index = tree.members[node].size() - 1;
+        while (index > 0) {
+            index = index - 1;
+            current = state(N_SPLIT, 0, compile_ast(tree, tree.members[node][index], next), current);
+        }
+        return current;
+    }
+    int child = tree.members[node][0];
+    if (type_kind == A_OPT) {
+        return state(N_SPLIT, 0, compile_ast(tree, child, next), next);
+    }
+    int loop = state(N_SPLIT, 0, -1, next);
+    int body = compile_ast(tree, child, loop);
+    out1[loop] = body;
+    if (type_kind == A_PLUS) {
+        return body;
+    }
+    return loop;
+}
+
+pub int Nfa.compile_pattern(str pattern, int next) {
+    Regex regex = Regex(pattern.chars(), classes);
+    int root = regex.alternation();
+    return compile_ast(regex.ast, root, next);
+}
+
+int Nfa.compile_string(str literal, int next) {
+    List<int> points = literal.chars();
+    int current = next;
+    int index = points.size();
+    while (index > 0) {
+        index = index - 1;
+        int id = classes.add([points[index]], [points[index]], false);
+        current = state(N_CLASS, id, current, -1);
+    }
+    return current;
+}
+
+/// Compile the lexical rule node `node` of `grammar` so that it continues at `next`.
+pub int Nfa.compile_rule(GRV_grammar.Grammar grammar, int node, int next) {
+    int type_kind = grammar.kind[node];
+    if (type_kind == GRV_grammar.STRING) {
+        return compile_string(grammar.strings[grammar.arg[node]], next);
+    }
+    if (type_kind == GRV_grammar.PATTERN) {
+        return compile_pattern(grammar.strings[grammar.arg[node]], next);
+    }
+    if (type_kind == GRV_grammar.BLANK) {
+        return next;
+    }
+    if (type_kind == GRV_grammar.SYMBOL) {
+        if (grammar.arg[node] < 0) {
+            return state(N_CLASS, classes.add([], [], false), next, -1);
+        }
+        return compile_rule(grammar, grammar.rule_body[grammar.arg[node]], next);
+    }
+    if (type_kind == GRV_grammar.SEQ) {
+        List<int> members = [];
+        int member = grammar.first[node];
+        while (member >= 0) {
+            members.push(member);
+            member = grammar.next[member];
+        }
+        int current = next;
+        int index = members.size();
+        while (index > 0) {
+            index = index - 1;
+            current = compile_rule(grammar, members[index], current);
+        }
+        return current;
+    }
+    if (type_kind == GRV_grammar.CHOICE) {
+        List<int> starts = [];
+        int member = grammar.first[node];
+        while (member >= 0) {
+            starts.push(compile_rule(grammar, member, next));
+            member = grammar.next[member];
+        }
+        int current = starts[starts.size() - 1];
+        int index = starts.size() - 1;
+        while (index > 0) {
+            index = index - 1;
+            current = state(N_SPLIT, 0, starts[index], current);
+        }
+        return current;
+    }
+    if (type_kind == GRV_grammar.REPEAT || type_kind == GRV_grammar.REPEAT1) {
+        int loop = state(N_SPLIT, 0, -1, next);
+        int body = compile_rule(grammar, grammar.first[node], loop);
+        out1[loop] = body;
+        if (type_kind == GRV_grammar.REPEAT1) {
+            return body;
+        }
+        return loop;
+    }
+    return compile_rule(grammar, grammar.first[node], next);
+}
+
+// ---------------------------------------------------------------- properties
+
+void add_range(List<int> lows, List<int> highs, int low_value, int high_value) {
+    lows.push(low_value);
+    highs.push(high_value);
+}
+
+void add_letters(List<int> lows, List<int> highs) {
+    add_range(lows, highs, 65, 90);
+    add_range(lows, highs, 97, 122);
+    add_range(lows, highs, 170, 170);
+    add_range(lows, highs, 181, 181);
+    add_range(lows, highs, 186, 186);
+    add_range(lows, highs, 192, 214);
+    add_range(lows, highs, 216, 246);
+    add_range(lows, highs, 248, 705);
+    add_range(lows, highs, 880, 1327);
+    add_range(lows, highs, 1329, 1366);
+    add_range(lows, highs, 1377, 1415);
+    add_range(lows, highs, 1488, 1514);
+    add_range(lows, highs, 1568, 1610);
+    add_range(lows, highs, 2308, 2361);
+    add_range(lows, highs, 3585, 3630);
+    add_range(lows, highs, 4256, 4293);
+    add_range(lows, highs, 4304, 4346);
+    add_range(lows, highs, 4352, 4607);
+    add_range(lows, highs, 7680, 8191);
+    add_range(lows, highs, 12354, 12438);
+    add_range(lows, highs, 12449, 12538);
+    add_range(lows, highs, 13312, 19903);
+    add_range(lows, highs, 19968, 40959);
+    add_range(lows, highs, 44032, 55203);
+    add_range(lows, highs, 65313, 65338);
+    add_range(lows, highs, 65345, 65370);
+}
+
+void add_digits(List<int> lows, List<int> highs) {
+    add_range(lows, highs, 48, 57);
+    add_range(lows, highs, 1632, 1641);
+    add_range(lows, highs, 1776, 1785);
+    add_range(lows, highs, 2406, 2415);
+    add_range(lows, highs, 65296, 65305);
+}
+
+void add_space(List<int> lows, List<int> highs) {
+    add_range(lows, highs, 9, 13);
+    add_range(lows, highs, 32, 32);
+    add_range(lows, highs, 133, 133);
+    add_range(lows, highs, 160, 160);
+    add_range(lows, highs, 5760, 5760);
+    add_range(lows, highs, 8192, 8202);
+    add_range(lows, highs, 8232, 8233);
+    add_range(lows, highs, 8239, 8239);
+    add_range(lows, highs, 8287, 8287);
+    add_range(lows, highs, 12288, 12288);
+}
+
+/// Add the code points of the Unicode property `name` (approximate, see the header).
+void add_property(str name, List<int> lows, List<int> highs) {
+    if (name == "L" || name == "Letter" || name == "XID_Start" || name == "Alphabetic") {
+        add_letters(lows, highs);
+    } else if (name == "Nd") {
+        add_digits(lows, highs);
+    } else if (name == "XID_Continue") {
+        add_letters(lows, highs);
+        add_digits(lows, highs);
+        add_range(lows, highs, 95, 95);
+        add_range(lows, highs, 768, 879);
+    } else if (name == "Zs") {
+        add_range(lows, highs, 32, 32);
+        add_range(lows, highs, 160, 160);
+        add_range(lows, highs, 5760, 5760);
+        add_range(lows, highs, 8192, 8202);
+        add_range(lows, highs, 8239, 8239);
+        add_range(lows, highs, 8287, 8287);
+        add_range(lows, highs, 12288, 12288);
+    } else if (name == "Control" || name == "Cc") {
+        add_range(lows, highs, 0, 31);
+        add_range(lows, highs, 127, 159);
+    }
+}
+
+// ---------------------------------------------------------------- regex
+
+type Ast {
+    List<int> kind = [];
+    List<int> arg = [];
+    List<List<int>> members = [];
+}
+
+int Ast.add(int ast_kind, int argument, List<int> children) {
+    kind.push(ast_kind);
+    arg.push(argument);
+    members.push(children);
+    return kind.size() - 1;
+}
+
+type Regex {
+    List<int> text;
+    Ast ast = Ast();
+    Classes classes;
+    int position = 0;
+}
+
+int Regex.peek() {
+    if (position < text.size()) {
+        return text[position];
+    }
+    return -1;
+}
+
+// after a backslash and its letter: the value of a character escape
+int Regex.escape_value(int letter) {
+    if (letter == 110) {
+        return 10;
+    }
+    if (letter == 116) {
+        return 9;
+    }
+    if (letter == 114) {
+        return 13;
+    }
+    if (letter == 102) {
+        return 12;
+    }
+    if (letter == 118) {
+        return 11;
+    }
+    if (letter == 48) {
+        return 0;
+    }
+    if (letter == 120 || letter == 117 || letter == 85) {
+        int digits = 2;
+        if (letter == 117) {
+            digits = 4;
+        } else if (letter == 85) {
+            digits = 8;
+        }
+        int value = 0;
+        if (peek() == 123) {
+            position = position + 1;
+            while (peek() >= 0 && peek() != 125) {
+                value = value * 16 + hex_value(peek());
+                position = position + 1;
+            }
+            position = position + 1;
+            return value;
+        }
+        for (int i in 0 .. digits) {
+            if (hex_value(peek()) < 0) {
+                break;
+            }
+            value = value * 16 + hex_value(peek());
+            position = position + 1;
+        }
+        return value;
+    }
+    return letter;
+}
+
+bool Regex.is_shorthand(int letter) {
+    return letter == 100 || letter == 119 || letter == 115;
+}
+
+// the ranges of \d \w \s, or the property after \p
+void Regex.shorthand(int letter, List<int> lows, List<int> highs) {
+    if (letter == 100) {
+        add_digits(lows, highs);
+    } else if (letter == 119) {
+        add_letters(lows, highs);
+        add_digits(lows, highs);
+        add_range(lows, highs, 95, 95);
+    } else {
+        add_space(lows, highs);
+    }
+}
+
+str Regex.property_name() {
+    // after \p or \P: {Name} or a single letter
+    if (peek() == 123) {
+        position = position + 1;
+        List<int> letters = [];
+        while (peek() >= 0 && peek() != 125) {
+            letters.push(peek());
+            position = position + 1;
+        }
+        position = position + 1;
+        return str.from_chars(letters);
+    }
+    int single = peek();
+    position = position + 1;
+    return str.from_chars([single]);
+}
+
+int Regex.bracket() {
+    // after '['
+    bool is_negated = false;
+    if (peek() == 94) {
+        is_negated = true;
+        position = position + 1;
+    }
+    List<int> lows = [];
+    List<int> highs = [];
+    while (peek() >= 0 && peek() != 93) {
+        int current = peek();
+        position = position + 1;
+        int low_end = current;
+        if (current == 92) {
+            int letter = peek();
+            position = position + 1;
+            if (is_shorthand(letter)) {
+                shorthand(letter, lows, highs);
+                continue;
+            }
+            if (letter == 112) {
+                add_property(property_name(), lows, highs);
+                continue;
+            }
+            low_end = escape_value(letter);
+        }
+        int high_end = low_end;
+        if (peek() == 45 && position + 1 < text.size() && text[position + 1] != 93) {
+            position = position + 1;
+            high_end = peek();
+            position = position + 1;
+            if (high_end == 92) {
+                high_end = escape_value(peek());
+                position = position + 1;
+            }
+        }
+        add_range(lows, highs, low_end, high_end);
+    }
+    position = position + 1;
+    return ast.add(A_CLASS, classes.add(lows, highs, is_negated), []);
+}
+
+int Regex.single(int code_point) {
+    return ast.add(A_CLASS, classes.add([code_point], [code_point], false), []);
+}
+
+int Regex.atom() {
+    int current = peek();
+    position = position + 1;
+    if (current == 40) {
+        if (peek() == 63 && position + 1 < text.size() && text[position + 1] == 58) {
+            position = position + 2;
+        }
+        int inner = alternation();
+        position = position + 1;
+        return inner;
+    }
+    if (current == 91) {
+        return bracket();
+    }
+    if (current == 46) {
+        return ast.add(A_CLASS, classes.add([10], [10], true), []);
+    }
+    if (current == 92) {
+        int letter = peek();
+        position = position + 1;
+        if (is_shorthand(letter)) {
+            List<int> lows = [];
+            List<int> highs = [];
+            shorthand(letter, lows, highs);
+            return ast.add(A_CLASS, classes.add(lows, highs, false), []);
+        }
+        if (letter == 68 || letter == 87 || letter == 83) {
+            List<int> lows = [];
+            List<int> highs = [];
+            shorthand(letter + 32, lows, highs);
+            return ast.add(A_CLASS, classes.add(lows, highs, true), []);
+        }
+        if (letter == 112 || letter == 80) {
+            List<int> lows = [];
+            List<int> highs = [];
+            add_property(property_name(), lows, highs);
+            return ast.add(A_CLASS, classes.add(lows, highs, letter == 80), []);
+        }
+        if (letter == 98 || letter == 66) {
+            return ast.add(A_CLASS, classes.add([], [], false), []);
+        }
+        return single(escape_value(letter));
+    }
+    return single(current);
+}
+
+int Regex.quantified() {
+    int node = atom();
+    while (peek() == 42 || peek() == 43 || peek() == 63 || peek() == 123) {
+        int quantifier = peek();
+        position = position + 1;
+        if (quantifier == 42) {
+            node = ast.add(A_STAR, 0, [node]);
+        } else if (quantifier == 43) {
+            node = ast.add(A_PLUS, 0, [node]);
+        } else if (quantifier == 63) {
+            node = ast.add(A_OPT, 0, [node]);
+        } else {
+            int minimum = 0;
+            while (peek() >= 48 && peek() <= 57) {
+                minimum = minimum * 10 + peek() - 48;
+                position = position + 1;
+            }
+            int maximum = minimum;
+            bool is_open = false;
+            if (peek() == 44) {
+                position = position + 1;
+                if (peek() == 125) {
+                    is_open = true;
+                } else {
+                    maximum = 0;
+                    while (peek() >= 48 && peek() <= 57) {
+                        maximum = maximum * 10 + peek() - 48;
+                        position = position + 1;
+                    }
+                }
+            }
+            position = position + 1;
+            List<int> sequence = [];
+            for (int i in 0 .. minimum) {
+                sequence.push(node);
+            }
+            if (is_open) {
+                sequence.push(ast.add(A_STAR, 0, [node]));
+            } else {
+                for (int i in minimum .. maximum) {
+                    sequence.push(ast.add(A_OPT, 0, [node]));
+                }
+            }
+            node = ast.add(A_SEQ, 0, sequence);
+        }
+        if (peek() == 63) {
+            position = position + 1;
+        }
+    }
+    return node;
+}
+
+int Regex.sequence() {
+    List<int> items = [];
+    while (peek() >= 0 && peek() != 124 && peek() != 41) {
+        items.push(quantified());
+    }
+    return ast.add(A_SEQ, 0, items);
+}
+
+int Regex.alternation() {
+    List<int> branches = [sequence()];
+    while (peek() == 124) {
+        position = position + 1;
+        branches.push(sequence());
+    }
+    if (branches.size() == 1) {
+        return branches[0];
+    }
+    return ast.add(A_ALT, 0, branches);
+}
+
+int hex_value(int code) {
+    if (code >= 48 && code <= 57) {
+        return code - 48;
+    }
+    if (code >= 97 && code <= 102) {
+        return code - 87;
+    }
+    if (code >= 65 && code <= 70) {
+        return code - 55;
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------- NFA

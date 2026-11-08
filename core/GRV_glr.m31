@@ -1,0 +1,251 @@
+/* The parser: LR with a graph-structured stack that forks where the table has
+ * several actions (GLR).
+ *
+ * The stack is an arena of (state, parent, node, extra) entries; a version is
+ * the index of its top entry plus the position after its last token and the
+ * sum of the dynamic precedences of its reductions. All versions are advanced
+ * one token at a time: reductions on the current token create new heads that
+ * are processed again, a shift moves the head to the next round. A head with no
+ * action on its token is dropped (unless the token is an extra, which is always
+ * shifted without changing state); when none is left the parse fails. Heads
+ * with the same state and parent are one (the better dynamic precedence wins).
+ *
+ * g1: no error recovery (a failure leaves root -1 and error_at), no external
+ * scanner, no incremental reuse. */
+
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
+
+const int MAX_VERSIONS = 16;
+
+type Stack {
+    List<int> state = [];
+    List<int> parent = [];
+    List<int> node = [];
+    List<int> extra = [];
+}
+
+int Stack.push(int top_state, int under, int tree_node, bool is_extra) {
+    state.push(top_state);
+    parent.push(under);
+    node.push(tree_node);
+    int flag = 0;
+    if (is_extra) {
+        flag = 1;
+    }
+    extra.push(flag);
+    return state.size() - 1;
+}
+
+type Run {
+    GRV_lexer.Lexer lexer;
+    GRV_lr.Table table;
+    GRV_tree.Tree tree;
+    Stack stack = Stack();
+    str text;
+    List<int> next_head = [];
+    List<int> next_position = [];
+    List<int> next_dyn = [];
+    List<int> work_head = [];
+    List<int> work_position = [];
+    List<int> work_dyn = [];
+    int done_head = -1;
+    int done_dyn = 0;
+    int furthest = 0;
+}
+
+// the goto state of `state` on non-terminal `symbol`
+int Run.goto_state(int state, int symbol) {
+    int cursor = table.find(state, symbol);
+    if (cursor < table.state_off[state + 1] && table.entries[cursor] / GRV_lr.ACTION_SPAN == symbol) {
+        return (table.entries[cursor] % GRV_lr.ACTION_SPAN) / 4;
+    }
+    return -1;
+}
+
+// reduce `production` on the stack from `head`; returns the new head
+int Run.reduce(int head, int production) {
+    GRV_lang.Lang lang = table.lang;
+    int count = lang.prod_length[production];
+    List<int> trailing = [];
+    int current = head;
+    List<int> children = [];
+    if (count > 0) {
+        while (stack.extra[current] == 1) {
+            trailing.push(stack.node[current]);
+            current = stack.parent[current];
+        }
+        int seen = 0;
+        while (seen < count) {
+            children.push(stack.node[current]);
+            if (stack.extra[current] == 0) {
+                seen = seen + 1;
+            }
+            current = stack.parent[current];
+        }
+        children.reverse();
+    }
+    trailing.reverse();
+    int lhs = lang.prod_lhs[production];
+    int node = tree.add_node(lhs, production, children, text.size(), lang.has_flag(lhs, GRV_lang.F_EXTRA));
+    if (count == 0) {
+        tree.start[node] = stack_end(head);
+        tree.stop[node] = tree.start[node];
+    }
+    int target = goto_state(stack.state[current], lhs);
+    int top = stack.push(target, current, node, lang.has_flag(lhs, GRV_lang.F_EXTRA));
+    for (int extra_node in trailing) {
+        top = stack.push(target, top, extra_node, true);
+    }
+    return top;
+}
+
+// the end offset of the last token under `head`
+int Run.stack_end(int head) {
+    int current = head;
+    while (current >= 0 && stack.node[current] < 0) {
+        current = stack.parent[current];
+    }
+    if (current < 0) {
+        return 0;
+    }
+    return tree.stop[stack.node[current]];
+}
+
+void Run.queue_next(int head, int position, int dyn) {
+    for (int i in 0 .. next_head.size()) {
+        if (stack.state[next_head[i]] == stack.state[head] && stack.parent[next_head[i]] == stack.parent[head] && next_position[i] == position) {
+            if (dyn > next_dyn[i]) {
+                next_head[i] = head;
+                next_dyn[i] = dyn;
+            }
+            return;
+        }
+    }
+    if (next_head.size() < MAX_VERSIONS) {
+        next_head.push(head);
+        next_position.push(position);
+        next_dyn.push(dyn);
+    }
+}
+
+// finish: the root node from the stack of an accepted head
+int Run.accept(int head) {
+    int current = head;
+    List<int> trailing = [];
+    while (stack.extra[current] == 1) {
+        trailing.push(stack.node[current]);
+        current = stack.parent[current];
+    }
+    trailing.reverse();
+    int top_node = stack.node[current];
+    current = stack.parent[current];
+    List<int> leading = [];
+    while (current >= 0 && stack.node[current] >= 0) {
+        leading.push(stack.node[current]);
+        current = stack.parent[current];
+    }
+    leading.reverse();
+    List<int> children = [];
+    for (int node in leading) {
+        children.push(node);
+    }
+    for (int action_index in 0 .. tree.kid_count[top_node]) {
+        children.push(tree.kids[tree.kid_at[top_node] + action_index]);
+    }
+    for (int node in trailing) {
+        children.push(node);
+    }
+    int root = tree.add_node(tree.node_symbol[top_node], tree.prod[top_node], children, 0, false);
+    tree.stop[root] = text.size();
+    return root;
+}
+
+void Run.process(int index) {
+    GRV_lang.Lang lang = table.lang;
+    int head = work_head[index];
+    int position = work_position[index];
+    int dyn = work_dyn[index];
+    int state = stack.state[head];
+    lexer.scan(text, position, table.valid_id[state]);
+    int term = lexer.token_term;
+    int start = lexer.token_start;
+    int stop = lexer.token_end;
+    if (term < 0) {
+        if (start > furthest) {
+            furthest = start;
+        }
+        return;
+    }
+    int cursor = table.find(state, term);
+    int limit = table.state_off[state + 1];
+    bool has_action = false;
+    int actions_end = cursor;
+    while (actions_end < limit && table.entries[actions_end] / GRV_lr.ACTION_SPAN == term) {
+        actions_end = actions_end + 1;
+        has_action = true;
+    }
+    if (!has_action) {
+        if (term > 0 && lang.has_flag(term, GRV_lang.F_EXTRA)) {
+            int leaf = tree.add_token(term, start, stop, true);
+            queue_next(stack.push(state, head, leaf, true), stop, dyn);
+        } else if (start > furthest) {
+            furthest = start;
+        }
+        return;
+    }
+    for (int action_index in cursor .. actions_end) {
+        int action = table.entries[action_index] % GRV_lr.ACTION_SPAN;
+        int kind = action % 4;
+        int argument = action / 4;
+        if (kind == GRV_lr.SHIFT) {
+            int leaf = tree.add_token(term, start, stop, lang.has_flag(term, GRV_lang.F_EXTRA) && false);
+            queue_next(stack.push(argument, head, leaf, false), stop, dyn);
+            if (stop > furthest) {
+                furthest = stop;
+            }
+        } else if (kind == GRV_lr.REDUCE) {
+            int top = reduce(head, argument);
+            work_head.push(top);
+            work_position.push(position);
+            work_dyn.push(dyn + lang.prod_dyn[argument]);
+        } else if (kind == GRV_lr.ACCEPT) {
+            if (done_head < 0 || dyn > done_dyn) {
+                done_head = accept(head);
+                done_dyn = dyn;
+            }
+        }
+    }
+}
+
+/// Parse `text` with the tables of `lexer`. The tree's root is -1 and error_at the furthest offset reached on failure.
+pub GRV_tree.Tree parse(GRV_lexer.Lexer lexer, str text) {
+    GRV_lr.Table table = lexer.table;
+    GRV_tree.Tree tree = GRV_tree.Tree(table.lang);
+    Run run = Run(lexer, table, tree, text);
+    int base = run.stack.push(0, -1, -1, false);
+    run.next_head.push(base);
+    run.next_position.push(0);
+    run.next_dyn.push(0);
+    while (run.next_head.size() > 0 && run.done_head < 0) {
+        run.work_head = run.next_head;
+        run.work_position = run.next_position;
+        run.work_dyn = run.next_dyn;
+        run.next_head = [];
+        run.next_position = [];
+        run.next_dyn = [];
+        int index = 0;
+        while (index < run.work_head.size()) {
+            run.process(index);
+            index = index + 1;
+        }
+    }
+    if (run.done_head >= 0) {
+        tree.root = run.done_head;
+    } else {
+        tree.error_at = run.furthest;
+    }
+    return tree;
+}

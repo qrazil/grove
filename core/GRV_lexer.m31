@@ -1,0 +1,363 @@
+/* The lexer: one DFA per set of valid terminals, built lazily.
+ *
+ * All terminals share one NFA (GRV_regex). A DFA state is a sorted set of NFA
+ * states (plus the valid set it belongs to); its transitions are computed the
+ * first time they are needed and kept (a dense row for ASCII, a map for the
+ * rest). A state accepts the best terminal that ends there: higher lexical
+ * precedence, then a string over a pattern, then the terminal that appeared
+ * first; across lengths the longest match wins unless it has a lower
+ * precedence. Only the terminals valid in the current parse state (plus the
+ * extras) take part (docs/SPEC.md 3.5).
+ *
+ * Whitespace extras ("skip" terminals) are not tokens. The NFA of a skip ends in
+ * a RESTART marker standing for "the start of the non-immediate tokens valid
+ * here". A character is padding (the token start moves past it) only if every
+ * way of consuming it is a skip; if a token can also start with it, it belongs to
+ * the match, and the match may continue through further skips into a longer
+ * token, but then only through characters that are both a skip and the start of
+ * a token (a pure skip after an accepted token ends the match, and so does any
+ * character that only starts a token, a comment included). The
+ * restart is dropped once the state accepts a token of precedence above the
+ * skip's (0). These rules are inferred from the oracle, not from the
+ * generator: C's `"\n"` after `#include <x>` takes the newline and the blank line
+ * after it (restart kept, same precedence), a space after an escape inside a
+ * string is content and not the start of the next escape (restart dropped,
+ * content has precedence 1), and `preproc_arg` (precedence -1) keeps its leading
+ * space (a first character is never decided by precedence). External terminals
+ * have no NFA: a scanner provides them. */
+
+import core.GRV_lang;
+import core.GRV_lr;
+import core.GRV_regex;
+
+const int ROW = 128;
+const int WIDE_SPAN = 2097152;
+
+pub type Lexer {
+    pub GRV_lang.Lang lang;
+    pub GRV_lr.Table table;
+    pub GRV_regex.Nfa nfa = GRV_regex.Nfa();
+    pub int token_term = 0;
+    pub int token_start = 0;
+    pub int token_end = 0;
+    pub int dfa_states = 0;
+    List<int> term_start = [];
+    List<List<int>> sets = [];
+    List<int> accept = [];
+    List<int> state_valid = [];
+    List<bool> state_partial = [];
+    List<int> row = [];
+    List<int> row_skip = [];
+    List<int> is_skip_state = [];
+    Map<int, List<int>> hubs = {};
+    Map<int, int> wide = {};
+    Map<str, int> set_ids = {};
+    Map<int, int> starts = {};
+    List<int> mark = [];
+    int epoch = 0;
+}
+
+// the NFA states reachable from `seeds` by epsilon moves, keeping the consuming and accepting ones
+List<int> Lexer.closure(List<int> seeds) {
+    epoch = epoch + 1;
+    List<int> stack = [];
+    List<int> out = [];
+    for (int seed in seeds) {
+        stack.push(seed);
+    }
+    while (stack.size() > 0) {
+        int current = stack.pop();
+        if (current < 0 || mark[current] == epoch) {
+            continue;
+        }
+        mark[current] = epoch;
+        int type_kind = nfa.kind[current];
+        if (type_kind == GRV_regex.N_SPLIT) {
+            stack.push(nfa.out1[current]);
+            stack.push(nfa.out2[current]);
+        } else if (type_kind == GRV_regex.N_EPSILON) {
+            stack.push(nfa.out1[current]);
+        } else {
+            out.push(current);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+// is terminal `left` a better match than `right` when both accept the same text
+bool Lexer.is_better(int left, int right) {
+    if (right < 0) {
+        return true;
+    }
+    if (lang.symbol_prec[left] != lang.symbol_prec[right]) {
+        return lang.symbol_prec[left] > lang.symbol_prec[right];
+    }
+    bool is_left_string = lang.has_flag(left, GRV_lang.F_STRING);
+    bool is_right_string = lang.has_flag(right, GRV_lang.F_STRING);
+    if (is_left_string != is_right_string) {
+        return is_left_string;
+    }
+    return left < right;
+}
+
+/* The closure of the starts of the non-immediate terminals valid for `valid`. */
+List<int> Lexer.hub_of(int valid, bool is_partial) {
+    match (hubs.get(valid)) {
+        case Some(List<int> known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    List<int> seeds = [];
+    for (int term in table.valid_sets[valid]) {
+        if (term_start[term] >= 0 && !lang.has_flag(term, GRV_lang.F_IMMEDIATE)) {
+            seeds.push(term_start[term]);
+        }
+    }
+    List<int> members = closure(seeds);
+    hubs.set(valid, members);
+    return members;
+}
+
+int Lexer.dfa_state(List<int> members, int valid, bool is_partial) {
+    str key = str(valid) + "|" + set_key(members);
+    if (is_partial) {
+        key = "p" + key;
+    }
+    match (set_ids.get(key)) {
+        case Some(int known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    int id = sets.size();
+    sets.push(members);
+    set_ids.set(key, id);
+    int best = -1;
+    for (int member in members) {
+        if (nfa.kind[member] == GRV_regex.N_ACCEPT && is_better(nfa.arg[member], best)) {
+            best = nfa.arg[member];
+        }
+    }
+    accept.push(best);
+    state_valid.push(valid);
+    state_partial.push(is_partial);
+    for (int i in 0 .. ROW) {
+        row.push(-2);
+        row_skip.push(0);
+    }
+    dfa_states = id + 1;
+    return id;
+}
+
+int Lexer.start_state(int valid) {
+    match (starts.get(valid)) {
+        case Some(int known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    List<int> seeds = [];
+    for (int term in table.valid_sets[valid]) {
+        if (term_start[term] >= 0) {
+            seeds.push(term_start[term]);
+        }
+    }
+    int id = dfa_state(closure(seeds), valid, false);
+    starts.set(valid, id);
+    return id;
+}
+
+int Lexer.step(int state, int code_point) {
+    if (code_point < ROW) {
+        int cached = row[state * ROW + code_point];
+        if (cached != -2) {
+            return cached;
+        }
+    } else {
+        int found = wide.get(state * WIDE_SPAN + code_point).or(-2);
+        if (found != -2) {
+            return found;
+        }
+    }
+    List<int> token_targets = [];
+    List<int> skip_targets = [];
+    List<int> hub_token = [];
+    List<int> hub_skip = [];
+    bool has_restart = false;
+    for (int member in sets[state]) {
+        int member_kind = nfa.kind[member];
+        if (member_kind == GRV_regex.N_RESTART) {
+            has_restart = true;
+        } else if (member_kind == GRV_regex.N_CLASS && nfa.classes.is_member(nfa.arg[member], code_point)) {
+            if (is_skip_state[member] == 0) {
+                token_targets.push(nfa.out1[member]);
+            } else {
+                skip_targets.push(nfa.out1[member]);
+            }
+        }
+    }
+    if (has_restart && (accept[state] < 0 || lang.symbol_prec[accept[state]] <= 0)) {
+        for (int member in hub_of(state_valid[state], false)) {
+            if (nfa.kind[member] == GRV_regex.N_CLASS && nfa.classes.is_member(nfa.arg[member], code_point)) {
+                if (is_skip_state[member] == 0) {
+                    hub_token.push(nfa.out1[member]);
+                } else {
+                    hub_skip.push(nfa.out1[member]);
+                }
+            }
+        }
+        if (!state_partial[state] || (hub_token.size() > 0 && hub_skip.size() > 0)) {
+            for (int target in hub_token) {
+                token_targets.push(target);
+            }
+            for (int target in hub_skip) {
+                skip_targets.push(target);
+            }
+        }
+    }
+    bool is_all_skip = token_targets.size() == 0;
+    List<int> targets = [];
+    for (int target in token_targets) {
+        targets.push(target);
+    }
+    for (int target in skip_targets) {
+        targets.push(target);
+    }
+    int next = -1;
+    if (targets.size() > 0 && !(is_all_skip && accept[state] >= 0)) {
+        next = dfa_state(closure(targets), state_valid[state], !is_all_skip);
+    }
+    if (code_point < ROW) {
+        row[state * ROW + code_point] = next;
+        if (is_all_skip && next >= 0) {
+            row_skip[state * ROW + code_point] = 1;
+        }
+    } else {
+        wide.set(state * WIDE_SPAN + code_point, next);
+        if (is_all_skip && next >= 0) {
+            wide.set(-(state * WIDE_SPAN + code_point) - 1, 1);
+        }
+    }
+    return next;
+}
+
+// is the (cached) transition of `state` on `code_point` a pure skip
+bool Lexer.is_skip_step(int state, int code_point) {
+    if (code_point < ROW) {
+        return row_skip[state * ROW + code_point] == 1;
+    }
+    return wide.get(-(state * WIDE_SPAN + code_point) - 1).or(0) == 1;
+}
+
+/** Lex one token at byte `from` for a parse state whose valid set is `valid`.
+ * Sets token_term (0 at the end of input, -1 if nothing matches), token_start, token_end. */
+pub void Lexer.scan(str text, int from, int valid) {
+    int size = text.size();
+    int state = start_state(valid);
+    int token_from = from;
+    int best = -1;
+    int best_end = from;
+    int cursor = from;
+    bool is_started = false;
+    while (cursor < size) {
+        int unit = decode(text, cursor);
+        int next = step(state, unit / 8);
+        if (next < 0) {
+            break;
+        }
+        if (!is_started && is_skip_step(state, unit / 8)) {
+            token_from = cursor + unit % 8;
+        } else {
+            is_started = true;
+        }
+        cursor = cursor + unit % 8;
+        state = next;
+        int here = accept[state];
+        if (here >= 0 && (best < 0 || lang.symbol_prec[here] >= lang.symbol_prec[best])) {
+            best = here;
+            best_end = cursor;
+        }
+    }
+    if (best >= 0) {
+        token_term = best;
+        token_start = token_from;
+        token_end = best_end;
+    } else if (token_from >= size) {
+        token_term = 0;
+        token_start = size;
+        token_end = size;
+    } else {
+        token_term = -1;
+        token_start = token_from;
+        token_end = token_from + decode(text, token_from) % 8;
+    }
+}
+
+str set_key(List<int> members) {
+    str out = "";
+    for (int member in members) {
+        out = out + str(member) + ",";
+    }
+    return out;
+}
+
+/// Build the NFA of every lexical terminal of the table's language.
+pub Lexer make(GRV_lr.Table table) {
+    GRV_lang.Lang lang = table.lang;
+    Lexer lexer = Lexer(lang, table);
+    int restart = lexer.nfa.state(GRV_regex.N_RESTART, 0, -1, -1);
+    List<int> skip_ranges = [];
+    for (int term in 0 .. lang.term_count) {
+        if (term > 0 && lang.symbol_root[term] >= 0) {
+            int before = lexer.nfa.kind.size();
+            if (lang.has_flag(term, GRV_lang.F_SKIP)) {
+                lexer.term_start.push(lexer.nfa.compile_rule(lang.grammar, lang.symbol_root[term], restart));
+                skip_ranges.push(before);
+                skip_ranges.push(lexer.nfa.kind.size());
+            } else {
+                int done = lexer.nfa.state(GRV_regex.N_ACCEPT, term, -1, -1);
+                lexer.term_start.push(lexer.nfa.compile_rule(lang.grammar, lang.symbol_root[term], done));
+            }
+        } else {
+            lexer.term_start.push(-1);
+        }
+    }
+    for (int i in 0 .. lexer.nfa.kind.size()) {
+        lexer.mark.push(0);
+        lexer.is_skip_state.push(0);
+    }
+    int range_at = 0;
+    while (range_at < skip_ranges.size()) {
+        for (int i in skip_ranges[range_at] .. skip_ranges[range_at + 1]) {
+            lexer.is_skip_state[i] = 1;
+        }
+        range_at = range_at + 2;
+    }
+    return lexer;
+}
+
+// the code point at byte `at` and its length, packed as code_point * 8 + length
+int decode(str text, int cursor) {
+    int lead = text.byte_at(cursor);
+    if (lead < 128) {
+        return lead * 8 + 1;
+    }
+    int length = 2;
+    int value = lead & 31;
+    if (lead >= 240) {
+        length = 4;
+        value = lead & 7;
+    } else if (lead >= 224) {
+        length = 3;
+        value = lead & 15;
+    }
+    for (int i in 1 .. length) {
+        value = value * 64 + (text.byte_at(cursor + i) & 63);
+    }
+    return value * 8 + length;
+}
