@@ -1,82 +1,201 @@
 /* The syntax tree: nodes in parallel integer lists, children in one flat list.
- * A node is an int. Tokens have production -1. `flags` bit 0 marks an extra
- * (a comment, met between the children a production names).
+ * A node is an int. Nothing is a reference, nothing points to a parent.
  *
- * This is the g1 form, with absolute byte offsets; the incremental form
- * (relative padding and size, immutable versions) replaces it at g2 behind the
- * same dump. */
+ * Positions are relative, as in tree-sitter's subtrees: a node has a `padding`
+ * (bytes between the end of the previous node and its first token: whitespace)
+ * and a `size`; its absolute start is the sum of the totals (padding + size) before
+ * it plus its padding. A parent's padding is its first child's. So an edit changes
+ * only the nodes on the path to it, and everything after it is the same nodes at
+ * a different offset that nobody has to touch.
+ *
+ * Nodes are immutable once published. A new version of the tree is a new root
+ * that shares every unchanged subtree with the old one (`edit` copies the path, the
+ * parser reuses what it can); the arena only grows, and `compact` copies what is
+ * still reachable into a fresh tree. `lookahead` is how many bytes past its end a
+ * node's shape depended on (what its last token's lexer looked at, and the token the
+ * parser had read when it reduced it): an edit that touches that window, or the node,
+ * marks it changed. */
 
 import core.GRV_lang;
+
+pub const int FLAG_EXTRA = 1;
+pub const int FLAG_CHANGED = 2;
+pub const int FLAG_FRAGILE = 4;
+pub const int FLAG_ERROR = 8;
+pub const int FLAG_HAS_ERROR = 16;
 
 pub type Tree {
     pub GRV_lang.Lang lang;
     pub List<int> node_symbol = [];
-    pub List<int> start = [];
-    pub List<int> stop = [];
-    pub List<int> prod = [];
+    pub List<int> padding = [];
+    pub List<int> size = [];
+    pub List<int> lookahead = [];
+    pub List<int> production = [];
     pub List<int> flags = [];
     pub List<int> kid_at = [];
     pub List<int> kid_count = [];
     pub List<int> kids = [];
+    pub List<int> repeat_depth = [];
     pub int root = -1;
+    pub int text_size = 0;
     pub int error_at = -1;
 }
 
-pub int Tree.add_token(int symbol, int from, int end_at, bool is_extra) {
+pub bool Tree.has_flag(int node, int flag) {
+    return (flags[node] / flag) % 2 == 1;
+}
+
+/// Does the tree contain an ERROR node.
+pub bool Tree.has_errors() {
+    return root >= 0 && (has_flag(root, FLAG_ERROR) || has_flag(root, FLAG_HAS_ERROR));
+}
+
+pub int Tree.total(int node) {
+    return padding[node] + size[node];
+}
+
+pub int Tree.add_token(int symbol, int token_padding, int token_size, int token_lookahead, int node_flags) {
     node_symbol.push(symbol);
-    start.push(from);
-    stop.push(end_at);
-    prod.push(-1);
-    int extra_flag = 0;
-    if (is_extra) {
-        extra_flag = 1;
-    }
-    flags.push(extra_flag);
+    padding.push(token_padding);
+    size.push(token_size);
+    lookahead.push(token_lookahead);
+    production.push(-1);
+    flags.push(node_flags);
     kid_at.push(0);
     kid_count.push(0);
+    repeat_depth.push(0);
     return node_symbol.size() - 1;
 }
 
-pub int Tree.add_node(int symbol, int production, List<int> children, int position, bool is_extra) {
-    node_symbol.push(symbol);
-    int from = position;
-    int end_at = position;
+/** A node over `children` (ids, in order): padding, size and the error flag follow from
+ * them; `reduce_lookahead` is how far past the node's end the parser had read when it
+ * built it. */
+pub int Tree.add_node(int symbol, int prod, List<int> children, int node_flags, int reduce_lookahead) {
+    if (children.size() >= 2 && lang.has_flag(symbol, GRV_lang.F_AUX)) {
+        int left = children[0];
+        int right = children[children.size() - 1];
+        if (node_symbol[left] == symbol && node_symbol[right] == symbol && repeat_depth[right] == 0) {
+            List<int> middle = [];
+            for (int index in 1 .. children.size() - 1) {
+                middle.push(children[index]);
+            }
+            return append(symbol, prod, left, middle, right, node_flags, reduce_lookahead);
+        }
+    }
+    return build(symbol, prod, children, node_flags, reduce_lookahead);
+}
+
+/* A repeat is built as it is read: `aux -> aux aux` joins what was read with one more
+ * element. Appending to the right of a left-leaning chain would make a list of n items n
+ * deep, and an edit would copy all of it. So the element goes into the right subtree while
+ * that is shallower than the left one (the way a binary counter carries), and the tree
+ * stays about log n deep with a path copy of that size per append. */
+int Tree.append(int symbol, int prod, int left, List<int> middle, int right, int node_flags, int reduce_lookahead) {
+    if (kid_count[left] >= 2 && repeat_depth[left] > 0) {
+        int left_first = kids[kid_at[left]];
+        int left_last = kids[kid_at[left] + kid_count[left] - 1];
+        if (node_symbol[left_first] == symbol && node_symbol[left_last] == symbol && repeat_depth[left_first] > repeat_depth[left_last]) {
+            List<int> upper = [];
+            for (int index in 0 .. kid_count[left] - 1) {
+                upper.push(kids[kid_at[left] + index]);
+            }
+            upper.push(append(symbol, prod, left_last, middle, right, node_flags, reduce_lookahead));
+            return build(symbol, prod, upper, node_flags, reduce_lookahead);
+        }
+    }
+    List<int> pair = [left];
+    for (int extra in middle) {
+        pair.push(extra);
+    }
+    pair.push(right);
+    return build(symbol, prod, pair, node_flags, reduce_lookahead);
+}
+
+// a node over `children`, with padding, size, lookahead, error mark and repeat depth derived
+int Tree.build(int symbol, int prod, List<int> children, int node_flags, int reduce_lookahead) {
+    int depth = 0;
+    if (children.size() >= 2 && lang.has_flag(symbol, GRV_lang.F_AUX)) {
+        int left = children[0];
+        int right = children[children.size() - 1];
+        if (node_symbol[left] == symbol && node_symbol[right] == symbol) {
+            depth = 1 + max_of(repeat_depth[left], repeat_depth[right]);
+        }
+    }
+    int first_padding = 0;
+    int whole = 0;
+    int last_window = 0;
+    int all_flags = node_flags;
+    for (int child in children) {
+        whole = whole + padding[child] + size[child];
+        last_window = lookahead[child];
+        if (has_flag(child, FLAG_ERROR) || has_flag(child, FLAG_HAS_ERROR)) {
+            if (!has_flag_in(all_flags, FLAG_HAS_ERROR)) {
+                all_flags = all_flags + FLAG_HAS_ERROR;
+            }
+        }
+    }
     if (children.size() > 0) {
-        from = start[children[0]];
-        end_at = stop[children[children.size() - 1]];
+        first_padding = padding[children[0]];
     }
-    start.push(from);
-    stop.push(end_at);
-    prod.push(production);
-    int extra_flag = 0;
-    if (is_extra) {
-        extra_flag = 1;
+    int window = last_window;
+    if (reduce_lookahead > window) {
+        window = reduce_lookahead;
     }
-    flags.push(extra_flag);
+    node_symbol.push(symbol);
+    padding.push(first_padding);
+    size.push(whole - first_padding);
+    lookahead.push(window);
+    production.push(prod);
+    flags.push(all_flags);
     kid_at.push(kids.size());
     kid_count.push(children.size());
+    repeat_depth.push(depth);
     for (int child in children) {
         kids.push(child);
     }
     return node_symbol.size() - 1;
 }
 
-pub bool Tree.is_extra(int node) {
-    return flags[node] == 1;
+/** A node exactly as given, without the balancing or the derivations of add_node:
+ * what `edit` and `compact` use to copy. */
+pub int Tree.add_raw(int symbol, int prod, List<int> children, int node_padding, int node_size, int node_lookahead, int node_flags, int depth) {
+    node_symbol.push(symbol);
+    padding.push(node_padding);
+    size.push(node_size);
+    lookahead.push(node_lookahead);
+    production.push(prod);
+    flags.push(node_flags);
+    kid_at.push(kids.size());
+    kid_count.push(children.size());
+    repeat_depth.push(depth);
+    for (int child in children) {
+        kids.push(child);
+    }
+    return node_symbol.size() - 1;
 }
 
-// print the visible named descendants of `parent`, as the oracle script does
-void Tree.emit(int parent, int depth, int inherited, List<str> lines) {
+/// The child ids of `node`.
+pub List<int> Tree.children(int node) {
+    return kids.slice(kid_at[node], kid_at[node] + kid_count[node]);
+}
+
+void Tree.emit(int parent, int parent_start, int depth, int inherited, List<str> lines) {
     GRV_lang.Lang language = lang;
-    int production = prod[parent];
+    int production_id = production[parent];
     int child_number = 0;
+    int cursor = parent_start;
+    if (kid_count[parent] > 0) {
+        cursor = parent_start - padding[kids[kid_at[parent]]];
+    }
     for (int child_index in 0 .. kid_count[parent]) {
         int kid = kids[kid_at[parent] + child_index];
+        int kid_start = cursor + padding[kid];
+        cursor = kid_start + size[kid];
         int field = -1;
         int alias = -1;
-        if (!is_extra(kid) && production >= 0) {
-            field = language.step_field[language.prod_start[production] + child_number];
-            alias = language.step_alias[language.prod_start[production] + child_number];
+        if (!has_flag(kid, FLAG_EXTRA) && production_id >= 0) {
+            field = language.step_field[language.prod_start[production_id] + child_number];
+            alias = language.step_alias[language.prod_start[production_id] + child_number];
             child_number = child_number + 1;
         }
         int use_field = inherited;
@@ -92,28 +211,117 @@ void Tree.emit(int parent, int depth, int inherited, List<str> lines) {
             name = language.grammar.strings[alias / 2];
         }
         if (is_visible && is_named) {
-            line(kid, depth, use_field, name, lines);
-            emit(kid, depth + 1, -1, lines);
+            line(kid_start, kid_start + size[kid], depth, use_field, name, lines);
+            emit(kid, kid_start, depth + 1, -1, lines);
             lines[lines.size() - 1] = lines[lines.size() - 1] + ")";
         } else if (!is_visible) {
-            emit(kid, depth, use_field, lines);
+            emit(kid, kid_start, depth, use_field, lines);
         }
     }
 }
 
-void Tree.line(int node, int depth, int field, str name, List<str> lines) {
+void Tree.line(int from, int to_at, int depth, int field, str name, List<str> lines) {
     str text = "  ".repeat(depth);
     if (field >= 0) {
         text = text + lang.field_names[field] + ": ";
     }
-    lines.push(text + "(" + name + "\t" + str(start[node]) + "-" + str(stop[node]));
+    lines.push(text + "(" + name + "\t" + str(from) + "-" + str(to_at));
 }
 
 /// The named nodes, one per line, indented, with field names and byte ranges: the format of tests/oracle/dump_sexp.lua.
 pub str Tree.sexp() {
     List<str> lines = [];
-    line(root, 0, -1, lang.symbol_name[node_symbol[root]], lines);
-    emit(root, 1, -1, lines);
+    int root_start = padding[root];
+    line(root_start, root_start + size[root], 0, -1, lang.symbol_name[node_symbol[root]], lines);
+    emit(root, root_start, 1, -1, lines);
     lines[lines.size() - 1] = lines[lines.size() - 1] + ")";
     return lines.join("\n");
 }
+
+// the children of `node` as text, with auxiliary repeat nodes flattened into their parent
+void Tree.full_children(int node, int cursor_start, List<str> parts) {
+    int cursor = cursor_start;
+    for (int child_index in 0 .. kid_count[node]) {
+        int kid = kids[kid_at[node] + child_index];
+        if (lang.has_flag(node_symbol[kid], GRV_lang.F_AUX)) {
+            full_children(kid, cursor, parts);
+        } else {
+            parts.push(full_text(kid, cursor + padding[kid]));
+        }
+        cursor = cursor + padding[kid] + size[kid];
+    }
+}
+
+str Tree.full_text(int node, int node_start) {
+    str text = "(" + str(node_symbol[node]) + " " + str(node_start) + "-" + str(node_start + size[node]);
+    if (has_flag(node, FLAG_EXTRA)) {
+        text = text + " extra";
+    }
+    List<str> parts = [];
+    int cursor = node_start;
+    if (kid_count[node] > 0) {
+        cursor = node_start - padding[kids[kid_at[node]]];
+    }
+    full_children(node, cursor, parts);
+    for (str part in parts) {
+        text = text + " " + part;
+    }
+    return text + ")";
+}
+
+/** Every node, hidden and anonymous ones too (the auxiliary nodes of repeats are
+ * flattened, their shape is the parser's business), as one line: symbol ids, byte
+ * ranges and the extra mark. Two trees of the same text are the same exactly when
+ * these are equal. */
+pub str Tree.full() {
+    return full_text(root, padding[root]);
+}
+
+/// How many nodes the tree holds in its arena (all versions).
+pub int Tree.arena_size() {
+    return node_symbol.size();
+}
+
+int Tree.copy_into(Tree fresh, int node) {
+    List<int> copied = [];
+    for (int child in children(node)) {
+        copied.push(copy_into(fresh, child));
+    }
+    fresh.node_symbol.push(node_symbol[node]);
+    fresh.padding.push(padding[node]);
+    fresh.size.push(size[node]);
+    fresh.lookahead.push(lookahead[node]);
+    fresh.production.push(production[node]);
+    fresh.flags.push(flags[node]);
+    fresh.kid_at.push(fresh.kids.size());
+    fresh.kid_count.push(copied.size());
+    fresh.repeat_depth.push(repeat_depth[node]);
+    for (int child in copied) {
+        fresh.kids.push(child);
+    }
+    return fresh.node_symbol.size() - 1;
+}
+
+/** A new tree holding only what is reachable from the root of this one, in the same
+ * shape: the way a long editing session gives back the nodes its old versions held. */
+pub Tree Tree.compact() {
+    Tree fresh = Tree(lang);
+    fresh.text_size = text_size;
+    fresh.root = copy_into(fresh, root);
+    return fresh;
+}
+
+int max_of(int left, int right) {
+    if (left > right) {
+        return left;
+    }
+    return right;
+}
+
+bool has_flag_in(int node_flags, int flag) {
+    return (node_flags / flag) % 2 == 1;
+}
+
+// ---------------------------------------------------------------- dump
+
+// ---------------------------------------------------------------- compaction

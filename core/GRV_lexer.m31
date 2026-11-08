@@ -40,6 +40,7 @@ pub type Lexer {
     pub int token_term = 0;
     pub int token_start = 0;
     pub int token_end = 0;
+    pub int token_examined = 0;
     pub int dfa_states = 0;
     List<int> term_start = [];
     List<List<int>> sets = [];
@@ -255,7 +256,9 @@ bool Lexer.is_skip_step(int state, int code_point) {
 }
 
 /** Lex one token at byte `from` for a parse state whose valid set is `valid`.
- * Sets token_term (0 at the end of input, -1 if nothing matches), token_start, token_end. */
+ * Sets token_term (0 at the end of input, -1 if nothing matches), token_start,
+ * token_end, and token_examined: the end of the last character the lexer looked at,
+ * which a later edit must not touch if the token is to be reused. */
 pub void Lexer.scan(str text, int from, int valid) {
     int size = text.size();
     int state = start_state(valid);
@@ -264,9 +267,11 @@ pub void Lexer.scan(str text, int from, int valid) {
     int best_end = from;
     int cursor = from;
     bool is_started = false;
+    int examined = from;
     while (cursor < size) {
         int unit = decode(text, cursor);
         int next = step(state, unit / 8);
+        examined = cursor + unit % 8;
         if (next < 0) {
             break;
         }
@@ -283,6 +288,7 @@ pub void Lexer.scan(str text, int from, int valid) {
             best_end = cursor;
         }
     }
+    token_examined = examined;
     if (best >= 0) {
         token_term = best;
         token_start = token_from;

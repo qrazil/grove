@@ -1,0 +1,103 @@
+/* Applying an edit to a tree: the path to the edit is copied and marked changed,
+ * everything else is shared.
+ *
+ * `apply(tree, start, old_end, new_end)` says that the bytes [start, old_end) of
+ * the old text were replaced by [start, new_end) of the new one. A node is touched
+ * when its padding or body meets the edited range, or when the range falls in the
+ * window its shape depended on (its end plus `lookahead`, ends included: an edit
+ * right after a token can make that token longer). Touched nodes are copied with
+ * the changed mark; their sizes are recomputed so that every untouched node keeps
+ * its place. The tree's root becomes the copy; the previous version stays in the
+ * arena and is still a valid tree.
+ *
+ * Positions inside the edited range collapse to its end in the new text; the
+ * touched leaves keep a size that only matters in total, because the parser
+ * re-reads them. */
+
+import core.GRV_tree;
+
+type Change {
+    GRV_tree.Tree tree;
+    int start;
+    int old_end;
+    int new_end;
+    int copied = 0;
+}
+
+int Change.delta() {
+    return new_end - old_end;
+}
+
+// where an old offset that begins a node goes: an insertion at the offset pushes the node on
+int Change.map_start(int offset) {
+    if (offset < start) {
+        return offset;
+    }
+    if (offset >= old_end) {
+        return offset + delta();
+    }
+    return new_end;
+}
+
+// where an old offset that ends a node goes: an insertion at the offset stays outside the node
+int Change.map_end(int offset) {
+    if (offset <= start) {
+        return offset;
+    }
+    if (offset >= old_end) {
+        return offset + delta();
+    }
+    return new_end;
+}
+
+// a copy of `node`, whose padding began at `old_position` before the edit and begins at `new_position` after it
+int Change.edit_node(int node, int old_position, int new_position) {
+    int old_node_start = old_position + tree.padding[node];
+    int old_node_end = old_node_start + tree.size[node];
+    int new_node_start = larger(new_position, map_start(old_node_start));
+    int new_node_end = larger(new_node_start, map_end(old_node_end));
+    copied = copied + 1;
+    int node_flags = tree.flags[node];
+    if (!tree.has_flag(node, GRV_tree.FLAG_CHANGED)) {
+        node_flags = node_flags + GRV_tree.FLAG_CHANGED;
+    }
+    List<int> kids_now = [];
+    if (tree.kid_count[node] == 0) {
+        int leaf = tree.add_token(tree.node_symbol[node], new_node_start - new_position, new_node_end - new_node_start, tree.lookahead[node], node_flags);
+        return leaf;
+    }
+    int old_cursor = old_position;
+    int new_cursor = new_position;
+    for (int kid in tree.children(node)) {
+        int old_kid_end = old_cursor + tree.padding[kid] + tree.size[kid];
+        int updated = kid;
+        if (old_cursor <= old_end && old_kid_end + tree.lookahead[kid] >= start) {
+            updated = edit_node(kid, old_cursor, new_cursor);
+        }
+        kids_now.push(updated);
+        old_cursor = old_kid_end;
+        new_cursor = new_cursor + tree.padding[updated] + tree.size[updated];
+    }
+    int whole = 0;
+    for (int kid in kids_now) {
+        whole = whole + tree.padding[kid] + tree.size[kid];
+    }
+    int made = tree.add_raw(tree.node_symbol[node], tree.production[node], kids_now, tree.padding[kids_now[0]], whole - tree.padding[kids_now[0]], tree.lookahead[node], node_flags, tree.repeat_depth[node]);
+    return made;
+}
+
+int larger(int left, int right) {
+    if (left > right) {
+        return left;
+    }
+    return right;
+}
+
+/** Record that the bytes [start, old_end) were replaced by [start, new_end); returns how many nodes were copied. */
+pub int apply(GRV_tree.Tree tree, int start, int old_end, int new_end) {
+    Change change = Change(tree, start, old_end, new_end);
+    int made = change.edit_node(tree.root, 0, 0);
+    tree.root = made;
+    tree.text_size = tree.text_size + new_end - old_end;
+    return change.copied;
+}

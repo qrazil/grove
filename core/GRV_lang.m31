@@ -50,6 +50,7 @@ pub type Lang {
     pub List<str> field_names = [];
     pub List<int> rule_symbol = [];
     pub int accept_symbol = 0;
+    pub int error_symbol = 0;
     pub int external_base = 0;
     pub List<int> extra_nts = [];
     pub Map<int, int> prec_list_of = {};
@@ -511,6 +512,7 @@ pub Lang build(GRV_grammar.Grammar grammar) {
     }
     // a bare-token rule whose terminal was already named by another rule becomes a non-terminal
     lang.accept_symbol = lang.add_symbol("$accept", F_NAMED, 0, -1);
+    lang.error_symbol = lang.add_symbol("ERROR", F_NAMED + F_VISIBLE, 0, -1);
     lang.add_production(lang.accept_symbol, [0, lang.rule_symbol[0], -1, -1, 0, 0]);
     // extras
     for (int extra in grammar.extras) {
