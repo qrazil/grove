@@ -1,9 +1,11 @@
 # grove: specification and feasibility study
 
-Status: **design**, version 0.0.1. Nothing here is implemented except the
-prototype in `core/` (a grammar.json loader, a token matcher and a PEG
-interpreter, 4 modules, 58 checks), which exists to answer questions in this
-text.
+Status: **design with a working g1**, version 0.1.0. Written first as a design
+(0.0.1); section 14 records what g1 built and measured, and where it changed the
+design. Decisions of the owner (2026-11-09): all recommendations of
+`QUESTIONS.md` approved, with `treesitter_maxfile` defaulting to **5 MB** (plus a
+long-line threshold, both options) and shipped table caches only as a later
+optimisation.
 
 How to read the claims. Each fact carries its source:
 
@@ -843,7 +845,7 @@ cheap for grove.
 | first parse of a 1 MB file | **complete within ~5 s of wall clock in time slices**, never more than **2 ms per slice**; the editor sees a partial tree meanwhile (8.4) | tree-sitter: 0.3-0.5 s (3-5 MB/s) [measured]; m31 may be up to ~10x slower on byte loops (perf board), hence 3-5 s |
 | reparse after one-character edit | median **<= 3 ms** for files <= 200 KB; **<= 10 ms** at 1 MB, in one or two slices | nvim+tree-sitter: 2-28 ms [measured, includes nvim overhead] |
 | viewport highlight (60 rows) | **<= 2 ms** per query slice, resumable | query cursor on the byte range |
-| memory | ~50 B per node worst case; refuse a tree (keep lexical highlighting) above a source size threshold, default **2 MB** (`treesitter_maxfile`, the option already planned in m3's TREE-SITTER.md) | |
+| memory | ~50 B per node worst case; refuse a tree (keep lexical highlighting) above a source size threshold, default **5 MB** (`treesitter_maxfile`, the option already planned in m3's TREE-SITTER.md; the owner's value) plus a long-line threshold, both options | |
 | table build | background, <= 60 s worst case first time, cached | unmeasured; g2 measures |
 | grammar load (JSON read + lowering) | 9 ms for cpp (437 KB), 4 ms typescript, 9 ms sql [measured] | |
 
@@ -1030,3 +1032,128 @@ languages) is demand-driven.
    check must fail on anything not permissive before any grammar is vendored.
 8. **Memory.** Per-language tables of 1-20 MB plus ~50 B per node; the owner
    sets the budget.
+
+## 14. g1 results (version 0.1.0)
+
+g1 is built: grammar.json to productions (`GRV_lang`), LR tables with GLR forks
+(`GRV_lr`), a lexer of lazily built DFAs (`GRV_lexer`, `GRV_regex`), the parser
+(`GRV_glr`) and a tree with the oracle's dump (`GRV_tree`). Everything below was
+measured on this machine with the public m31 v0.14.2, `cc -O2`, one core; the
+commands are in `tests/tables.m31` and `tests/bench.m31`, the recorded output in
+`experiments/results/`.
+
+### 14.1 What matches the oracle
+
+- json: the 8 fixtures are identical to tree-sitter's trees (types, fields, byte
+  ranges), now with the LR/GLR parser as well as with the PEG prototype.
+- c: the 6 small fixtures and 22 microtests of the tricky places (preprocessor
+  lines, escapes, `a = b = c`, a blank line after `#include`) are identical.
+- c, real files: of 90 sampled sources and headers (`/usr/include`, the kernel
+  tools tree) tree-sitter parses 21 without ERROR; grove's tree is identical on
+  **9 of those 21**. The 12 others are listed in
+  `experiments/results/c_real_files.txt`. They are not random bugs: 9 are a
+  parse failure on a construct whose GLR resolution differs from tree-sitter's
+  (`__BEGIN_DECLS` followed by `typedef`, `goto done;` before `case`, a call
+  statement after declarations, `__extension__`, a lone `}` inside `#ifdef`), 1 is
+  a lexical-precedence case (`#define X /* c */`: tree-sitter lexes the comment,
+  grove the macro argument), 1 a node-type choice at a conflict (`macro_type_specifier`
+  against `expression_statement`), 1 an end of range. They are g4 work.
+
+### 14.2 Measured: table build
+
+`tests/tables.m31`, load = read grammar.json, flatten = productions, tables =
+LR(1) states with safe merging, conflict resolution and entries:
+
+| grammar | symbols | productions | states | table entries (KB as int arrays) | forks | load + flatten | tables |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| json | 27 | 27 | 42 | 178 (1) | 0 | < 1 ms | < 1 ms |
+| lua | 141 | 195 | 314 | 8 273 (64) | 4 | 2 ms | 45 ms |
+| c | 268 | 1 371 | 1 961 | 98 643 (770) | 33 | 13 ms | 463 ms |
+| go | 212 | 511 | 868 | 24 048 (187) | 62 | 5 ms | 145 ms |
+| java | 295 | 1 056 | 1 974 | 58 354 (455) | 52 | 9 ms | 450 ms |
+| javascript | 262 | 1 511 | 2 429 | 105 336 (822) | 1 036 | 12 ms | 462 ms |
+| python | 273 | 854 | 1 500 | 51 466 (402) | 957 | 6 ms | 328 ms |
+| rust | 344 | 4 178 | 6 033 | 218 930 (1 710) | 2 146 | 23 ms | 1 739 ms |
+| typescript | 388 | 4 385 | 8 271 | 347 208 (2 712) | 3 800 | 33 ms | 2 533 ms |
+| cpp | 564 | 2 288 | 3 813 | 215 330 (1 682) | 2 038 | 18 ms | 1 703 ms |
+| sql | 726 | 6 960 | 15 380 | 210 000 (1 640) | 5 | 124 ms | 3 757 ms |
+| kotlin | 366 | 1 826 | 2 983 | 240 065 (1 875) | 7 451 | 20 ms | 1 148 ms |
+| bash | 294 | 5 064 | 7 716 | 203 000 (1 585) | 3 631 | 31 ms | 2 809 ms |
+| yaml | 298 | 693 | 909 | 15 714 (122) | 316 | 4 ms | 53 ms |
+
+Conclusions that settle questions of sections 3.4 to 3.7:
+
+1. **A table generator in m31 is cheap enough to run at load time**: json, lua
+   and c in well under half a second, the largest grammar (sql) in 3.8 s, the
+   hardest to resolve (typescript) in 2.5 s. This is without any optimisation. The
+   disk cache of 3.7 is therefore an optimisation for the first open of a big
+   language, not a precondition (as the owner decided).
+2. **Memory is small**: the tables are 0.1 to 2.7 MB as `Array<int>` (8 bytes per
+   entry); the biggest is typescript. My estimates of 3.6 (up to 20 MB) were an
+   order of magnitude high, because the generator does not build tree-sitter's
+   dense large-state rows.
+3. **The LR(0)-core experiment was a good predictor of size** (c 1 128 LR(0)
+   states, 1 961 here; tree-sitter 1 466) and a bad one of fidelity: the real
+   problem was not state count but merging (14.4).
+
+### 14.3 Measured: parse speed
+
+`tests/bench.m31`, the GLR parser with its lexer, steady state:
+
+| input | bytes | tree nodes | cold lexer | warm lexer | tree-sitter (nvim, 3.2) |
+|---|--:|--:|--:|--:|--:|
+| json, generated | 1 727 103 | 1 359 002 | 1 080 ms | 1 067 ms | 341 ms |
+| json | 113 215 | 90 602 | 69 ms | 68 ms | |
+| c (a clean fixture repeated) | 608 000 | 402 001 | 385 ms | 391 ms | |
+
+That is 1.6 MB/s in m31 against 3 to 5 MB/s for tree-sitter: **2 to 3 times
+slower**, not the 10 times feared in 9.1. The lexer builds 49 DFA states for the
+whole JSON file and 279 for the C one, so lazy construction is cheap. This parse
+has no node reuse and allocates a tree node per token and per reduction; g2 (flat
+immutable tree, no per-reduction lists) should recover part of the gap. The PEG
+prototype takes 281 ms for the 113 KB JSON file, 4 times slower than the GLR parser.
+
+### 14.4 Where the implementation differs from the design (and why)
+
+1. **LALR was not enough; the tables are LR(1) with merging only when safe.**
+   LALR merged the state after an identifier on the right of `=` in C with a
+   state where `_expression -> identifier .` can be followed by `=`; the spurious
+   shift/reduce conflict was resolved by precedence in favour of the reduce, and
+   `a = b = c`, `a.b = c`, `*a = b` failed to parse. The fix is Pager's idea,
+   tested directly: a new state with an existing core is merged into it only if
+   the merged state has no conflict (reduce/reduce or reduce/shift) that either
+   did not have. The change cost 23 states in C (1 938 to 1 961).
+2. **The repeat rule `aux -> aux aux` is ambiguous by construction**; a tie
+   between reducing it and shifting is resolved as reduce, so the stack stays
+   shallow (checked on json: 0 forks).
+3. **Extras that are non-terminals** (lua's multi-token comment) are added to every
+   state's closure with every terminal as lookahead and a goto to the same state.
+   Built and measured (lua tables), not yet parsed (lua needs its scanner).
+4. **Lexing rules inferred from the oracle** (not from the generator): the
+   longest match wins unless it has lower precedence; a character that is both
+   whitespace and the start of a token is part of the match (tree-sitter's trees
+   show C's `"\n"` taking blank lines after `#include`), a restart after such a
+   character is allowed only through characters that are again both, never through
+   a pure skip or a comment, and not when the state already accepts a token of
+   precedence above 0 (a space after an escape inside a C string stays content).
+   These rules reproduce eight small cases and nine real files; the generator's
+   real rule is still unknown (`GRV_lexer`'s header says so).
+5. **Unicode properties are approximations** (`GRV_regex.add_property`): ASCII
+   exact, common blocks for letters, digits and spaces. The real tables are still a
+   g0 task.
+6. **Forks are counted, not checked against `conflicts`.** The `forks` column is
+   how many (state, lookahead) pairs keep several actions; tree-sitter would
+   refuse any not declared. C has 33 against 8 declared conflict groups; for
+   javascript (1 036), python (957), kotlin (7 451) and typescript (3 800) the
+   count shows that conflict resolution differs from the generator's more than
+   it should. Those grammars cannot be trusted until forks fall to the declared
+   conflicts. It is the first thing to examine in g4.
+7. The tree is still g1's: absolute offsets, a node per token. Section 5 stays
+   the design for g2.
+
+### 14.5 What g1 does not do
+
+Error recovery (a failure leaves `root = -1` and `error_at`), external scanners,
+incremental reuse, queries, anonymous nodes in the dump, `MISSING`, dynamic
+precedence beyond picking the highest sum among finished versions, version merging
+beyond equal (state, parent), named-precedence ordering across lists.

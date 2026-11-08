@@ -1,0 +1,47 @@
+grove LR/GLR parser vs tree-sitter (nvim, c.so of the same grammar revision), random sample of C sources and headers under /usr/include and the kernel tools tree, files for which tree-sitter reports no ERROR/MISSING
+DIFF  KERNEL/tools/lib/bpf/netlink.c line 1
+     ours: !!!! KERNEL/tools/lib/bpf/netlink.c: error at 3580
+     want: (translation_unit	0-22166
+DIFF  /usr/include/obstack.h line 1
+     ours: !!!! /usr/include/obstack.h: error at 8394
+     want: (translation_unit	0-21307
+ok    /usr/include/pnglibconf.h
+DIFF  KERNEL/tools/lib/subcmd/run-command.c line 1
+     ours: !!!! KERNEL/tools/lib/subcmd/run-command.c: error at 1663
+     want: (translation_unit	0-5829
+DIFF  KERNEL/tools/lib/subcmd/pager.c line 1
+     ours: !!!! KERNEL/tools/lib/subcmd/pager.c: error at 2120
+     want: (translation_unit	0-2536
+ok    /usr/include/limits.h
+DIFF  /usr/include/stdint.h line 1
+     ours: !!!! /usr/include/stdint.h: error at 1496
+     want: (translation_unit	0-8155
+ok    /usr/include/sysexits.h
+ok    KERNEL/tools/lib/bpf/bpf_endian.h
+DIFF  KERNEL/tools/lib/bpf/ringbuf.c line 1
+     ours: !!!! KERNEL/tools/lib/bpf/ringbuf.c: error at 1669
+     want: (translation_unit	0-16343
+ok    /usr/include/tar.h
+DIFF  KERNEL/tools/lib/bpf/elf.c line 141
+     ours:           (macro_type_specifier	1168-1177
+     want:           (expression_statement	1168-1178
+DIFF  /usr/include/proc_service.h line 1
+     ours: !!!! /usr/include/proc_service.h: error at 1105
+     want: (translation_unit	0-3477
+DIFF  /usr/include/pngconf.h line 262
+     ours:       value: (preproc_arg	11878-11893))
+     want:       (comment	11878-11893))
+ok    /usr/include/thread_db.h
+DIFF  /usr/include/gelf.h line 1
+     ours: !!!! /usr/include/gelf.h: error at 11376
+     want: (translation_unit	0-11406
+DIFF  /usr/include/histedit.h line 1
+     ours: !!!! /usr/include/histedit.h: error at 9604
+     want: (translation_unit	0-9640
+ok    /usr/include/a.out.h
+ok    /usr/include/endian.h
+DIFF  /usr/include/complex.h line 1
+     ours: !!!! /usr/include/complex.h: error at 1354
+     want: (translation_unit	0-8140
+ok    KERNEL/tools/lib/bpf/bpf_gen_internal.h
+9 identical, 12 different, 69 skipped (tree-sitter reports errors)

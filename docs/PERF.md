@@ -40,3 +40,17 @@ DFA. It is the floor the real lexer has to beat by an order of magnitude.
 
 `experiments/results/table_sizes.txt`; the LR(0) automaton sizes in
 `experiments/results/lr0_estimate.txt`.
+
+## grove g1 (0.1.0): tables and parse
+
+Same machine and toolchain as above. Full numbers and the reading in
+`docs/SPEC.md` section 14; recorded in `experiments/results/table_build.txt`.
+
+| what | result |
+|---|---|
+| LR(1) tables, json / lua / c | under 1 ms / 45 ms / 463 ms |
+| LR(1) tables, typescript / cpp / sql | 2.5 s / 1.7 s / 3.8 s |
+| table size (Array of int) | 1 KB json, 64 KB lua, 770 KB c, 2.7 MB typescript |
+| GLR parse, 1.7 MB generated JSON | 1.08 s (1.6 MB/s); tree-sitter in nvim 0.34 s |
+| GLR parse, 608 KB C | 0.39 s |
+| lexer DFA states built lazily | 49 (JSON file), 279 (C file) |

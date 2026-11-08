@@ -1,5 +1,17 @@
 # Questions for the owner
 
+## Answers (owner, 2026-11-09)
+
+All recommendations below are **approved**, with two changes: the large-file
+cutoff `treesitter_maxfile` defaults to **5 MB** (not 2 MB), together with a
+long-line threshold, both options (parsing is time-sliced anyway); and
+first-open background table builds are fine, with shipped caches only as a later
+optimisation. The repository `qrazil/grove` exists (public, branch `main`). A
+separate `grove-grammars` repository is approved by name and will be created when
+vendoring starts. g1's measurements (SPEC 14.2) made the cache a smaller question
+than expected: tables build in under half a second for json, lua and c.
+
+
 Each question has the recommendation I would act on if you do not answer. Numbers
 refer to `SPEC.md` sections. They are ordered by how much they block.
 
