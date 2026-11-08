@@ -1,0 +1,250 @@
+/* A JSON reader that keeps the order of an object's members.
+ *
+ * Why not the standard library's `json`: its `Object` is a `Map<str, Value>`,
+ * whose order is the hash table's (reference 3.9), and grammar.json is
+ * order-sensitive: the first rule is the start symbol, the order of `rules`
+ * numbers the symbols, the order of `externals` is the scanner's token order.
+ *
+ * The document is flat: a node is an index into parallel lists, children and
+ * siblings are indices, nothing holds a reference to another node, so a
+ * grammar of a million nodes is a handful of objects and cannot form a cycle. */
+
+pub const int NULL = 0;
+pub const int BOOL = 1;
+pub const int NUMBER = 2;
+pub const int STRING = 3;
+pub const int ARRAY = 4;
+pub const int OBJECT = 5;
+
+pub type Doc {
+    pub List<int> kind = [];
+    pub List<int> first = [];
+    pub List<int> next = [];
+    pub List<int> key = [];
+    pub List<int> value = [];
+    pub List<str> strings = [];
+}
+
+/// Append a node of `kind_of` that is the member `key_index` of its object (-1 if none).
+pub int Doc.add(int kind_of, int key_index, int payload) {
+    kind.push(kind_of);
+    first.push(-1);
+    next.push(-1);
+    key.push(key_index);
+    value.push(payload);
+    return kind.size() - 1;
+}
+
+/// The member of object `node` called `name`, or -1.
+pub int Doc.member(int node, str name) {
+    int child = first[node];
+    while (child >= 0) {
+        if (key[child] >= 0 && strings[key[child]] == name) {
+            return child;
+        }
+        child = next[child];
+    }
+    return -1;
+}
+
+/// The text of string node `node`.
+pub str Doc.text(int node) {
+    return strings[value[node]];
+}
+
+type Reader {
+    str source;
+    Doc doc;
+    int position = 0;
+    bool is_failed = false;
+}
+
+void Reader.skip() {
+    while (position < source.size() && is_space(source.byte_at(position))) {
+        position = position + 1;
+    }
+}
+
+// the string starting at the opening quote; returns its index in doc.strings
+int Reader.string() {
+    position = position + 1;
+    str out = "";
+    int from = position;
+    while (position < source.size() && source.byte_at(position) != 34) {
+        if (source.byte_at(position) == 92 && position + 1 < source.size()) {
+            out = out + source.substr(from, position);
+            int code = source.byte_at(position + 1);
+            position = position + 2;
+            int point = code;
+            if (code == 110) {
+                point = 10;
+            } else if (code == 116) {
+                point = 9;
+            } else if (code == 114) {
+                point = 13;
+            } else if (code == 98) {
+                point = 8;
+            } else if (code == 102) {
+                point = 12;
+            } else if (code == 117 && position + 4 <= source.size()) {
+                point = 0;
+                for (int index in 0 .. 4) {
+                    int digit = hex_digit(source.byte_at(position + index));
+                    if (digit < 0) {
+                        is_failed = true;
+                        return -1;
+                    }
+                    point = point * 16 + digit;
+                }
+                position = position + 4;
+                if (point >= 55296 && point <= 57343) {
+                    point = 65533;
+                }
+            }
+            out = out + str.from_chars([point]);
+            from = position;
+        } else {
+            position = position + 1;
+        }
+    }
+    if (position >= source.size()) {
+        is_failed = true;
+        return -1;
+    }
+    out = out + source.substr(from, position);
+    position = position + 1;
+    doc.strings.push(out);
+    return doc.strings.size() - 1;
+}
+
+bool Reader.has_word(str literal) {
+    if (position + literal.size() <= source.size() && source.substr(position, position + literal.size()) == literal) {
+        position = position + literal.size();
+        return true;
+    }
+    is_failed = true;
+    return false;
+}
+
+void Reader.append(int parent, int last, int child) {
+    if (last < 0) {
+        doc.first[parent] = child;
+    } else {
+        doc.next[last] = child;
+    }
+}
+
+int Reader.value(int key_index) {
+    skip();
+    if (is_failed || position >= source.size()) {
+        is_failed = true;
+        return -1;
+    }
+    int byte = source.byte_at(position);
+    if (byte == 34) {
+        int text_index = string();
+        return doc.add(STRING, key_index, text_index);
+    }
+    if (byte == 123 || byte == 91) {
+        bool is_object = byte == 123;
+        int closer = 93;
+        int node = doc.add(ARRAY, key_index, 0);
+        if (is_object) {
+            closer = 125;
+            doc.kind[node] = OBJECT;
+        }
+        position = position + 1;
+        int last = -1;
+        skip();
+        if (position < source.size() && source.byte_at(position) == closer) {
+            position = position + 1;
+            return node;
+        }
+        while (!is_failed) {
+            skip();
+            int member_key = -1;
+            if (is_object) {
+                if (position >= source.size() || source.byte_at(position) != 34) {
+                    is_failed = true;
+                    break;
+                }
+                member_key = string();
+                skip();
+                if (position >= source.size() || source.byte_at(position) != 58) {
+                    is_failed = true;
+                    break;
+                }
+                position = position + 1;
+            }
+            int child = value(member_key);
+            if (is_failed) {
+                break;
+            }
+            append(node, last, child);
+            last = child;
+            skip();
+            if (position >= source.size()) {
+                is_failed = true;
+                break;
+            }
+            int sep = source.byte_at(position);
+            position = position + 1;
+            if (sep == closer) {
+                return node;
+            }
+            if (sep != 44) {
+                is_failed = true;
+            }
+        }
+        return -1;
+    }
+    if (byte == 116) {
+        has_word("true");
+        return doc.add(BOOL, key_index, 1);
+    }
+    if (byte == 102) {
+        has_word("false");
+        return doc.add(BOOL, key_index, 0);
+    }
+    if (byte == 110) {
+        has_word("null");
+        return doc.add(NULL, key_index, 0);
+    }
+    int from = position;
+    while (position < source.size() && (source.byte_at(position) == 45 || (source.byte_at(position) >= 48 && source.byte_at(position) <= 57))) {
+        position = position + 1;
+    }
+    if (position == from) {
+        is_failed = true;
+        return -1;
+    }
+    return doc.add(NUMBER, key_index, source.substr(from, position).parse_int().or(0));
+}
+
+bool is_space(int byte) {
+    return byte == 32 || byte == 9 || byte == 10 || byte == 13;
+}
+
+int hex_digit(int byte) {
+    if (byte >= 48 && byte <= 57) {
+        return byte - 48;
+    }
+    if (byte >= 97 && byte <= 102) {
+        return byte - 87;
+    }
+    if (byte >= 65 && byte <= 70) {
+        return byte - 55;
+    }
+    return -1;
+}
+
+/// Read `text`; the root is node 0. `Err(position)` is where it stopped.
+pub Result<Doc, int> read(str text) {
+    Reader reader = Reader(text, Doc());
+    int root = reader.value(-1);
+    reader.skip();
+    if (reader.is_failed || root != 0 || reader.position < text.size()) {
+        return Result<Doc, int>.Err(reader.position);
+    }
+    return Result<Doc, int>.Ok(reader.doc);
+}

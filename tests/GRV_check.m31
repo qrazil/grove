@@ -1,0 +1,37 @@
+// Test helpers: a tally with the summary line tests/test.sh looks for.
+
+pub type Check {
+    pub int passed = 0;
+    pub int failed = 0;
+}
+
+pub void Check.ok(str name, bool is_true) {
+    if (is_true) {
+        passed = passed + 1;
+    } else {
+        failed = failed + 1;
+        print("FAIL " + name);
+    }
+}
+
+pub void Check.eq_int(str name, int got, int want) {
+    if (got == want) {
+        passed = passed + 1;
+    } else {
+        failed = failed + 1;
+        print("FAIL " + name + ": got " + str(got) + " want " + str(want));
+    }
+}
+
+pub void Check.eq_str(str name, str got, str want) {
+    if (got == want) {
+        passed = passed + 1;
+    } else {
+        failed = failed + 1;
+        print("FAIL " + name + ": got [" + got + "] want [" + want + "]");
+    }
+}
+
+pub void Check.finish() {
+    print(str(passed) + " passed, " + str(failed) + " failed");
+}

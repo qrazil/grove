@@ -1,0 +1,212 @@
+/* grammar.json as a flat rule arena.
+ *
+ * Every rule node of every rule (and of extras) is one index into parallel
+ * lists. `kind` is one of the constants below; `arg` is what the kind needs
+ * (an index into `strings` for STRING/PATTERN/FIELD/ALIAS, a rule index for
+ * SYMBOL, the precedence for PREC*); `first` is the content of a unary node or
+ * the first member of SEQ/CHOICE, and `next` chains members.
+ *
+ * A SYMBOL that names no rule but an external token has arg = -(index + 1). */
+
+import core.GRV_json;
+
+pub const int BLANK = 0;
+pub const int STRING = 1;
+pub const int PATTERN = 2;
+pub const int SYMBOL = 3;
+pub const int SEQ = 4;
+pub const int CHOICE = 5;
+pub const int REPEAT = 6;
+pub const int REPEAT1 = 7;
+pub const int FIELD = 8;
+pub const int ALIAS = 9;
+pub const int TOKEN = 10;
+pub const int IMMEDIATE_TOKEN = 11;
+pub const int PREC = 12;
+pub const int PREC_LEFT = 13;
+pub const int PREC_RIGHT = 14;
+pub const int PREC_DYNAMIC = 15;
+pub const Array<str> KIND_NAMES = ["BLANK", "STRING", "PATTERN", "SYMBOL", "SEQ", "CHOICE", "REPEAT", "REPEAT1", "FIELD", "ALIAS", "TOKEN", "IMMEDIATE_TOKEN", "PREC", "PREC_LEFT", "PREC_RIGHT", "PREC_DYNAMIC"];
+
+pub type Grammar {
+    pub str name = "";
+    pub List<int> kind = [];
+    pub List<int> arg = [];
+    pub List<int> flag = [];
+    pub List<int> first = [];
+    pub List<int> next = [];
+    pub List<str> strings = [];
+    pub List<str> rule_name = [];
+    pub List<int> rule_body = [];
+    pub List<int> extras = [];
+    pub List<str> externals = [];
+    pub Map<str, int> rule_index = {};
+}
+
+int Grammar.node(int node_kind, int argument, int content) {
+    kind.push(node_kind);
+    arg.push(argument);
+    flag.push(0);
+    first.push(content);
+    next.push(-1);
+    return kind.size() - 1;
+}
+
+int Grammar.intern(str text) {
+    strings.push(text);
+    return strings.size() - 1;
+}
+
+// Lower the JSON rule object `json_node` of `doc` to rule nodes; -1 on a malformed rule.
+int Grammar.lower(GRV_json.Doc doc, int json_node) {
+    int type_node = doc.member(json_node, "type");
+    if (type_node < 0) {
+        return -1;
+    }
+    int type_kind = kind_of(doc.text(type_node));
+    if (type_kind == BLANK) {
+        return node(BLANK, 0, -1);
+    }
+    if (type_kind == STRING || type_kind == PATTERN) {
+        return node(type_kind, intern(doc.text(doc.member(json_node, "value"))), -1);
+    }
+    if (type_kind == SYMBOL) {
+        str target = doc.text(doc.member(json_node, "name"));
+        match (rule_index.get(target)) {
+            case Some(int rule): {
+                return node(SYMBOL, rule, -1);
+            }
+            case None: {
+                int ext = externals.index_of(target).or(-1);
+                if (ext < 0) {
+                    return -1;
+                }
+                return node(SYMBOL, -(ext + 1), -1);
+            }
+        }
+    }
+    if (type_kind == SEQ || type_kind == CHOICE) {
+        int self = node(type_kind, 0, -1);
+        int last = -1;
+        int member = doc.first[doc.member(json_node, "members")];
+        while (member >= 0) {
+            int child = lower(doc, member);
+            if (child < 0) {
+                return -1;
+            }
+            if (last < 0) {
+                first[self] = child;
+            } else {
+                next[last] = child;
+            }
+            last = child;
+            member = doc.next[member];
+        }
+        return self;
+    }
+    if (type_kind < 0) {
+        return -1;
+    }
+    int content = lower(doc, doc.member(json_node, "content"));
+    if (content < 0) {
+        return -1;
+    }
+    int argument = 0;
+    if (type_kind == FIELD) {
+        argument = intern(doc.text(doc.member(json_node, "name")));
+    } else if (type_kind == ALIAS) {
+        argument = intern(doc.text(doc.member(json_node, "value")));
+    } else if (type_kind >= PREC) {
+        int precedence = doc.member(json_node, "value");
+        if (doc.kind[precedence] == GRV_json.NUMBER) {
+            argument = doc.value[precedence];
+        } else {
+            argument = intern(doc.text(precedence));
+        }
+    }
+    int self = node(type_kind, argument, content);
+    if (type_kind == ALIAS) {
+        int is_named = doc.member(json_node, "named");
+        flag[self] = doc.value[is_named];
+    }
+    return self;
+}
+
+/// How many rule nodes have kind `type_kind`.
+pub int Grammar.count(int type_kind) {
+    int total = 0;
+    for (int i in 0 .. kind.size()) {
+        if (kind[i] == type_kind) {
+            total = total + 1;
+        }
+    }
+    return total;
+}
+
+int kind_of(str type_name) {
+    for (int type_kind in 0 .. KIND_NAMES.size()) {
+        if (KIND_NAMES[type_kind] == type_name) {
+            return type_kind;
+        }
+    }
+    return -1;
+}
+
+/// Load a grammar from the text of a grammar.json. `Err(reason)` names the first thing wrong.
+pub Result<Grammar, str> load(str text) {
+    match (GRV_json.read(text)) {
+        case Err(int offset): {
+            return Result<Grammar, str>.Err("grammar.json: not JSON at byte " + str(offset));
+        }
+        case Ok(GRV_json.Doc doc): {
+            Grammar grammar = Grammar();
+            int rules = doc.member(0, "rules");
+            if (rules < 0) {
+                return Result<Grammar, str>.Err("grammar.json: no rules");
+            }
+            grammar.name = doc.text(doc.member(0, "name"));
+            // externals first: a SYMBOL names a rule if there is one, else an external
+            int externals_node = doc.member(0, "externals");
+            if (externals_node >= 0) {
+                int external_node = doc.first[externals_node];
+                while (external_node >= 0) {
+                    int name_node = doc.member(external_node, "name");
+                    if (name_node >= 0) {
+                        grammar.externals.push(doc.text(name_node));
+                    } else {
+                        grammar.externals.push("");
+                    }
+                    external_node = doc.next[external_node];
+                }
+            }
+            int entry = doc.first[rules];
+            while (entry >= 0) {
+                grammar.rule_index.set(doc.strings[doc.key[entry]], grammar.rule_name.size());
+                grammar.rule_name.push(doc.strings[doc.key[entry]]);
+                entry = doc.next[entry];
+            }
+            entry = doc.first[rules];
+            while (entry >= 0) {
+                int body = grammar.lower(doc, entry);
+                if (body < 0) {
+                    return Result<Grammar, str>.Err("grammar.json: bad rule " + doc.strings[doc.key[entry]]);
+                }
+                grammar.rule_body.push(body);
+                entry = doc.next[entry];
+            }
+            int extras_node = doc.member(0, "extras");
+            if (extras_node >= 0) {
+                int x = doc.first[extras_node];
+                while (x >= 0) {
+                    int lowered = grammar.lower(doc, x);
+                    if (lowered < 0) {
+                        return Result<Grammar, str>.Err("grammar.json: bad extra");
+                    }
+                    grammar.extras.push(lowered);
+                    x = doc.next[x];
+                }
+            }
+            return Result<Grammar, str>.Ok(grammar);
+        }
+    }
+}

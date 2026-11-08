@@ -1,0 +1,49 @@
+// Loading grammar.json (tree-sitter-json's, vendored under tests/data/json).
+
+import core.GRV_grammar;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+match (io.read("tests/data/json/grammar.json")) {
+    case Ok(str text): {
+        match (GRV_grammar.load(text)) {
+            case Ok(GRV_grammar.Grammar grammar): {
+                check.eq_str("name", grammar.name, "json");
+                check.eq_int("rule count", grammar.rule_name.size(), 13);
+                check.eq_str("first rule is the start symbol", grammar.rule_name[0], "document");
+                check.eq_str("rules keep the file's order", grammar.rule_name[1], "_value");
+                check.eq_int("two extras", grammar.extras.size(), 2);
+                check.eq_int("no externals", grammar.externals.size(), 0);
+                check.eq_int("SYMBOL nodes", grammar.count(GRV_grammar.SYMBOL), 18);
+                check.eq_int("IMMEDIATE_TOKEN nodes", grammar.count(GRV_grammar.IMMEDIATE_TOKEN), 2);
+                check.eq_int("FIELD nodes", grammar.count(GRV_grammar.FIELD), 2);
+                check.eq_int("document is a SYMBOL", grammar.kind[grammar.rule_body[0]], GRV_grammar.SYMBOL);
+                check.eq_int("which names rule 1", grammar.arg[grammar.rule_body[0]], 1);
+            }
+            case Err(str reason): {
+                check.ok("load json: " + reason, false);
+            }
+        }
+    }
+    case Err(io.Error failure): {
+        check.ok("read grammar.json", false);
+    }
+}
+match (GRV_grammar.load("{\"name\": \"x\", \"rules\": {\"a\": {\"type\": \"SYMBOL\", \"name\": \"missing\"}}}")) {
+    case Ok(GRV_grammar.Grammar grammar): {
+        check.ok("a SYMBOL naming nothing is refused", false);
+    }
+    case Err(str reason): {
+        check.eq_str("refusal names the rule", reason, "grammar.json: bad rule a");
+    }
+}
+match (GRV_grammar.load("[1, 2")) {
+    case Ok(GRV_grammar.Grammar grammar): {
+        check.ok("not JSON is refused", false);
+    }
+    case Err(str reason): {
+        check.ok("not JSON is refused", reason.starts_with("grammar.json: not JSON"));
+    }
+}
+check.finish();

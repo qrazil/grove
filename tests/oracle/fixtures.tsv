@@ -1,0 +1,9 @@
+# lang<TAB>path of a fixture; tests/oracle/ts/ holds tree-sitter's tree for it
+json	tests/oracle/fixtures/simple.json
+json	tests/oracle/fixtures/empty_array.json
+json	tests/oracle/fixtures/empty_object.json
+json	tests/oracle/fixtures/records.json
+json	tests/oracle/fixtures/numbers.json
+json	tests/oracle/fixtures/strings.json
+json	tests/oracle/fixtures/nested.json
+json	tests/oracle/fixtures/numkey.json

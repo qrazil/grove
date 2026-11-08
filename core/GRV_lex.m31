@@ -1,0 +1,435 @@
+/* Token matching by position sets, over the rule arena.
+ *
+ * `ends(rule, starts)` answers: if a token of this rule starts at any of the
+ * byte offsets `starts`, at which offsets can it end. A STRING is a literal, a
+ * PATTERN is compiled once to a small regex tree (the JS-regex subset the 23
+ * grammars use, minus lookahead, which none uses) and walked the same way, so
+ * SEQ/CHOICE/REPEAT inside a TOKEN need no second implementation. This is the
+ * simplest thing that is correct (Thompson-style, no backtracking, linear in
+ * the text per step); the real lexer compiles the same trees to one DFA.
+ *
+ * Prototype limits, on purpose: bytes not code points (a negated class eats
+ * one byte, so `[^x]` alone can split a UTF-8 character; under `+` or `*` the
+ * continuation bytes follow), no \p{..}, no \b, no unicode escapes above \xFF. */
+
+import core.GRV_grammar;
+
+const int R_CHAR = 0;
+const int R_ANY = 1;
+const int R_CLASS = 2;
+const int R_SEQ = 3;
+const int R_ALT = 4;
+const int R_STAR = 5;
+const int R_PLUS = 6;
+const int R_OPT = 7;
+const int R_FAIL = 8;
+
+type Rx {
+    List<int> kind = [];
+    List<int> arg = [];
+    List<int> negate = [];
+    List<int> low = [];
+    List<int> high = [];
+    List<List<int>> members = [];
+}
+
+int Rx.add(int rx_kind, int argument, List<int> children) {
+    kind.push(rx_kind);
+    arg.push(argument);
+    negate.push(0);
+    members.push(children);
+    return kind.size() - 1;
+}
+
+/* class ranges are kept per class node in `low`/`high`, delimited by `arg`
+ * (the first range) and `members[node]` holding [count] */
+int Rx.add_class(List<int> lows, List<int> highs, bool is_negated) {
+    int node = add(R_CLASS, low.size(), [lows.size()]);
+    for (int i in 0 .. lows.size()) {
+        low.push(lows[i]);
+        high.push(highs[i]);
+    }
+    if (is_negated) {
+        negate[node] = 1;
+    }
+    return node;
+}
+
+type PatternParser {
+    str source;
+    Rx regex;
+    int position = 0;
+}
+
+int PatternParser.peek() {
+    if (position < source.size()) {
+        return source.byte_at(position);
+    }
+    return -1;
+}
+
+int PatternParser.class_node() {
+    // after '['
+    bool is_negated = false;
+    if (peek() == 94) {
+        is_negated = true;
+        position = position + 1;
+    }
+    List<int> lows = [];
+    List<int> highs = [];
+    while (peek() >= 0 && peek() != 93) {
+        int current = peek();
+        position = position + 1;
+        int low_end = current;
+        if (current == 92) {
+            int letter = peek();
+            position = position + 1;
+            if (is_shorthand(letter)) {
+                add_shorthand(letter, lows, highs);
+                continue;
+            }
+            low_end = escape_value(letter);
+        }
+        int high_end = low_end;
+        if (peek() == 45 && position + 1 < source.size() && source.byte_at(position + 1) != 93) {
+            position = position + 1;
+            high_end = peek();
+            position = position + 1;
+            if (high_end == 92) {
+                high_end = escape_value(peek());
+                position = position + 1;
+            }
+        }
+        lows.push(low_end);
+        highs.push(high_end);
+    }
+    position = position + 1;
+    return regex.add_class(lows, highs, is_negated);
+}
+
+int PatternParser.atom() {
+    int current = peek();
+    position = position + 1;
+    if (current == 40) {
+        if (peek() == 63 && position + 1 < source.size() && source.byte_at(position + 1) == 58) {
+            position = position + 2;
+        }
+        int inner = alternation();
+        position = position + 1;
+        return inner;
+    }
+    if (current == 91) {
+        return class_node();
+    }
+    if (current == 46) {
+        return regex.add(R_ANY, 0, []);
+    }
+    if (current == 92) {
+        int letter = peek();
+        position = position + 1;
+        if (is_shorthand(letter)) {
+            List<int> lows = [];
+            List<int> highs = [];
+            add_shorthand(letter, lows, highs);
+            return regex.add_class(lows, highs, false);
+        }
+        if (letter == 112 || letter == 80 || letter == 98 || letter == 66 || letter == 117 || letter == 85) {
+            if (peek() == 123) {
+                while (peek() >= 0 && peek() != 125) {
+                    position = position + 1;
+                }
+                position = position + 1;
+            }
+            return regex.add(R_FAIL, 0, []);
+        }
+        return regex.add(R_CHAR, escape_value(letter), []);
+    }
+    return regex.add(R_CHAR, current, []);
+}
+
+int PatternParser.quantified() {
+    int node = atom();
+    while (peek() == 42 || peek() == 43 || peek() == 63 || peek() == 123) {
+        int quantifier = peek();
+        position = position + 1;
+        if (quantifier == 42) {
+            node = regex.add(R_STAR, 0, [node]);
+        } else if (quantifier == 43) {
+            node = regex.add(R_PLUS, 0, [node]);
+        } else if (quantifier == 63) {
+            node = regex.add(R_OPT, 0, [node]);
+        } else {
+            // {n}, {n,}, {n,m}: expand into a sequence
+            int from = position;
+            while (peek() != 125) {
+                position = position + 1;
+            }
+            List<str> parts = source.substr(from, position).split(",");
+            position = position + 1;
+            int low_count = parts[0].parse_int().or(0);
+            List<int> sequence = [];
+            for (int i in 0 .. low_count) {
+                sequence.push(node);
+            }
+            if (parts.size() == 2) {
+                if (parts[1] == "") {
+                    sequence.push(regex.add(R_STAR, 0, [node]));
+                } else {
+                    for (int i in low_count .. parts[1].parse_int().or(low_count)) {
+                        sequence.push(regex.add(R_OPT, 0, [node]));
+                    }
+                }
+            }
+            node = regex.add(R_SEQ, 0, sequence);
+        }
+        if (peek() == 63) {
+            position = position + 1;
+        }
+    }
+    return node;
+}
+
+int PatternParser.sequence() {
+    List<int> items = [];
+    while (peek() >= 0 && peek() != 124 && peek() != 41) {
+        items.push(quantified());
+    }
+    return regex.add(R_SEQ, 0, items);
+}
+
+int PatternParser.alternation() {
+    List<int> branches = [sequence()];
+    while (peek() == 124) {
+        position = position + 1;
+        branches.push(sequence());
+    }
+    if (branches.size() == 1) {
+        return branches[0];
+    }
+    return regex.add(R_ALT, 0, branches);
+}
+
+void add_shorthand(int letter, List<int> lows, List<int> highs) {
+    if (letter == 100) {
+        lows.push(48);
+        highs.push(57);
+    } else if (letter == 119) {
+        lows.push(48);
+        highs.push(57);
+        lows.push(65);
+        highs.push(90);
+        lows.push(95);
+        highs.push(95);
+        lows.push(97);
+        highs.push(122);
+    } else {
+        lows.push(9);
+        highs.push(13);
+        lows.push(32);
+        highs.push(32);
+    }
+}
+
+bool is_shorthand(int letter) {
+    return letter == 100 || letter == 119 || letter == 115;
+}
+
+int escape_value(int letter) {
+    if (letter == 110) {
+        return 10;
+    }
+    if (letter == 116) {
+        return 9;
+    }
+    if (letter == 114) {
+        return 13;
+    }
+    if (letter == 102) {
+        return 12;
+    }
+    if (letter == 118) {
+        return 11;
+    }
+    if (letter == 48) {
+        return 0;
+    }
+    return letter;
+}
+
+pub type Lexer {
+    pub GRV_grammar.Grammar grammar;
+    pub str text = "";
+    Rx regex = Rx();
+    Map<str, int> compiled = {};
+}
+
+List<int> Lexer.rx_step(int node, List<int> starts) {
+    List<int> out = [];
+    int type_kind = regex.kind[node];
+    if (type_kind == R_CHAR || type_kind == R_ANY || type_kind == R_CLASS) {
+        for (int offset in starts) {
+            if (offset >= text.size()) {
+                continue;
+            }
+            int byte = text.byte_at(offset);
+            bool is_hit = false;
+            if (type_kind == R_CHAR) {
+                is_hit = byte == regex.arg[node];
+            } else if (type_kind == R_ANY) {
+                is_hit = byte != 10;
+            } else {
+                int count = regex.members[node][0];
+                for (int i in 0 .. count) {
+                    if (byte >= regex.low[regex.arg[node] + i] && byte <= regex.high[regex.arg[node] + i]) {
+                        is_hit = true;
+                    }
+                }
+                if (regex.negate[node] == 1) {
+                    is_hit = !is_hit;
+                }
+            }
+            if (is_hit) {
+                add_unique(out, offset + 1);
+            }
+        }
+        return out;
+    }
+    if (type_kind == R_SEQ) {
+        List<int> current = starts;
+        for (int child in regex.members[node]) {
+            current = rx_step(child, current);
+            if (current.size() == 0) {
+                break;
+            }
+        }
+        return current;
+    }
+    if (type_kind == R_ALT) {
+        for (int child in regex.members[node]) {
+            for (int offset in rx_step(child, starts)) {
+                add_unique(out, offset);
+            }
+        }
+        return out;
+    }
+    if (type_kind == R_OPT) {
+        for (int offset in starts) {
+            add_unique(out, offset);
+        }
+        for (int offset in rx_step(regex.members[node][0], starts)) {
+            add_unique(out, offset);
+        }
+        return out;
+    }
+    if (type_kind == R_STAR || type_kind == R_PLUS) {
+        List<int> frontier = starts;
+        if (type_kind == R_PLUS) {
+            frontier = rx_step(regex.members[node][0], starts);
+            for (int offset in frontier) {
+                add_unique(out, offset);
+            }
+        } else {
+            for (int offset in starts) {
+                add_unique(out, offset);
+            }
+        }
+        while (frontier.size() > 0) {
+            List<int> fresh = [];
+            for (int offset in rx_step(regex.members[node][0], frontier)) {
+                if (!out.contains(offset)) {
+                    out.push(offset);
+                    fresh.push(offset);
+                }
+            }
+            frontier = fresh;
+        }
+        return out;
+    }
+    return out;
+}
+
+int Lexer.pattern(str source) {
+    match (compiled.get(source)) {
+        case Some(int node): {
+            return node;
+        }
+        case None: {
+            PatternParser parser = PatternParser(source, regex);
+            int node = parser.alternation();
+            compiled.set(source, node);
+            return node;
+        }
+    }
+}
+
+/// The offsets at which a token of rule node `node` can end, given that it starts at one of `starts`.
+pub List<int> Lexer.ends(int node, List<int> starts) {
+    int type_kind = grammar.kind[node];
+    if (type_kind == GRV_grammar.STRING) {
+        List<int> out = [];
+        str literal = grammar.strings[grammar.arg[node]];
+        for (int offset in starts) {
+            if (offset + literal.size() <= text.size() && text.substr(offset, offset + literal.size()) == literal) {
+                add_unique(out, offset + literal.size());
+            }
+        }
+        return out;
+    }
+    if (type_kind == GRV_grammar.PATTERN) {
+        return rx_step(pattern(grammar.strings[grammar.arg[node]]), starts);
+    }
+    if (type_kind == GRV_grammar.BLANK) {
+        return starts;
+    }
+    if (type_kind == GRV_grammar.SYMBOL) {
+        if (grammar.arg[node] < 0) {
+            return [];
+        }
+        return ends(grammar.rule_body[grammar.arg[node]], starts);
+    }
+    if (type_kind == GRV_grammar.SEQ) {
+        List<int> current = starts;
+        int member = grammar.first[node];
+        while (member >= 0 && current.size() > 0) {
+            current = ends(member, current);
+            member = grammar.next[member];
+        }
+        return current;
+    }
+    if (type_kind == GRV_grammar.CHOICE) {
+        List<int> out = [];
+        int member = grammar.first[node];
+        while (member >= 0) {
+            for (int offset in ends(member, starts)) {
+                add_unique(out, offset);
+            }
+            member = grammar.next[member];
+        }
+        return out;
+    }
+    if (type_kind == GRV_grammar.REPEAT || type_kind == GRV_grammar.REPEAT1) {
+        List<int> frontier = starts;
+        List<int> out = [];
+        if (type_kind == GRV_grammar.REPEAT) {
+            out = starts.slice(0, starts.size());
+        }
+        while (frontier.size() > 0) {
+            List<int> fresh = [];
+            for (int offset in ends(grammar.first[node], frontier)) {
+                if (!out.contains(offset)) {
+                    out.push(offset);
+                    fresh.push(offset);
+                }
+            }
+            frontier = fresh;
+        }
+        return out;
+    }
+    return ends(grammar.first[node], starts);
+}
+
+void add_unique(List<int> set, int value) {
+    if (!set.contains(value)) {
+        set.push(value);
+    }
+}

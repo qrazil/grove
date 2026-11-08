@@ -1,0 +1,48 @@
+/* The oracle: grove's trees against tree-sitter's, for the fixtures of
+ * tests/oracle/fixtures.tsv (the dumps in tests/oracle/ts come from
+ * tests/oracle/refresh.sh). Node types, field names and byte ranges must be
+ * identical; any difference is a failure, there is no floor yet. */
+
+import core.GRV_grammar;
+import core.GRV_peg;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+match (GRV_grammar.load(read_or_empty("tests/data/json/grammar.json"))) {
+    case Err(str reason): {
+        check.ok("load json grammar: " + reason, false);
+    }
+    case Ok(GRV_grammar.Grammar grammar): {
+        for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
+            List<str> columns = row.split("\t");
+            if (row.starts_with("#") || columns.size() < 2) {
+                continue;
+            }
+            str path = columns[1];
+            str dump = read_or_empty("tests/oracle/ts/" + path.split("/").join("__") + ".sexp");
+            List<str> dump_lines = dump.split("\n");
+            // drop the "@@ lang path" header and the trailing newline's empty line
+            str want = dump_lines.slice(1, dump_lines.size() - 1).join("\n");
+            GRV_peg.Tree tree = GRV_peg.parse(grammar, read_or_empty(path));
+            if (tree.root < 0) {
+                check.ok(path + ": parse failed at byte " + str(tree.error_at), false);
+            } else {
+                check.eq_str(path, tree.sexp(), want);
+            }
+        }
+    }
+}
+check.finish();

@@ -1,0 +1,291 @@
+/* A first parse: the grammar's own rules interpreted as a PEG.
+ *
+ * This is NOT the design (docs/SPEC.md picks LR); it exists to measure and to
+ * prove the loader and the tree on a real grammar.json: ordered choice, greedy
+ * repeats, no left recursion, no precedence, no conflicts, no error recovery,
+ * no external scanner. It is correct for grammars that are LL(1)-ish (json) and
+ * says "no" otherwise. Extras are skipped before each token; a named extra
+ * (a comment) becomes a leaf where it was met.
+ *
+ * Nodes live in one arena: `rule` (the symbol, or -1), start and end byte,
+ * `field` (index into the grammar's strings, -1), first child, next sibling. */
+
+import core.GRV_grammar;
+import core.GRV_lex;
+
+pub type Tree {
+    pub GRV_grammar.Grammar grammar;
+    pub List<int> rule = [];
+    pub List<int> start = [];
+    pub List<int> stop = [];
+    pub List<int> field = [];
+    pub List<int> alias = [];
+    pub List<int> first = [];
+    pub List<int> next = [];
+    pub int root = -1;
+    pub int error_at = -1;
+}
+
+pub int Tree.add(int rule_index, int from, int finish, List<int> children) {
+    rule.push(rule_index);
+    start.push(from);
+    stop.push(finish);
+    field.push(-1);
+    alias.push(-1);
+    first.push(-1);
+    next.push(-1);
+    int self = rule.size() - 1;
+    int last = -1;
+    for (int child in children) {
+        if (last < 0) {
+            first[self] = child;
+        } else {
+            next[last] = child;
+        }
+        last = child;
+    }
+    return self;
+}
+
+str Tree.type_of(int node) {
+    if (alias[node] >= 0) {
+        return grammar.strings[alias[node]];
+    }
+    return grammar.rule_name[rule[node]];
+}
+
+void Tree.dump(int node, int depth, List<str> lines) {
+    str line = "  ".repeat(depth);
+    if (field[node] >= 0) {
+        line = line + grammar.strings[field[node]] + ": ";
+    }
+    line = line + "(" + type_of(node) + "\t" + str(start[node]) + "-" + str(stop[node]);
+    lines.push(line);
+    int child = first[node];
+    while (child >= 0) {
+        dump(child, depth + 1, lines);
+        child = next[child];
+    }
+    lines[lines.size() - 1] = lines[lines.size() - 1] + ")";
+}
+
+/// The named nodes, one per line, indented, with field names and byte ranges: the format of tests/oracle/dump_sexp.lua.
+pub str Tree.sexp() {
+    List<str> lines = [];
+    dump(root, 0, lines);
+    return lines.join("\n");
+}
+
+type Parser {
+    GRV_lex.Lexer lexer;
+    Tree tree;
+    str text;
+    int position = 0;
+    int furthest = 0;
+    List<int> token_start = [];
+    List<int> token_end = [];
+}
+
+void Parser.restore(int saved, int out_size, int tokens, List<int> out) {
+    position = saved;
+    while (out.size() > out_size) {
+        out.pop();
+    }
+    while (token_start.size() > tokens) {
+        token_start.pop();
+        token_end.pop();
+    }
+}
+
+// the longest token of `node` at `position`, or false
+bool Parser.can_match_token(int node, bool can_skip_extras, List<int> out) {
+    if (can_skip_extras) {
+        skip_extras(out);
+    }
+    List<int> ends = lexer.ends(node, [position]);
+    int best = -1;
+    for (int end_at in ends) {
+        if (end_at > best) {
+            best = end_at;
+        }
+    }
+    if (best <= position) {
+        return false;
+    }
+    token_start.push(position);
+    token_end.push(best);
+    position = best;
+    if (best > furthest) {
+        furthest = best;
+    }
+    return true;
+}
+
+void Parser.skip_extras(List<int> out) {
+    bool did_move = true;
+    while (did_move) {
+        did_move = false;
+        for (int extra in tree.grammar.extras) {
+            int kind = tree.grammar.kind[extra];
+            List<int> ends = lexer.ends(extra, [position]);
+            int best = -1;
+            for (int end_at in ends) {
+                if (end_at > best) {
+                    best = end_at;
+                }
+            }
+            if (best > position) {
+                if (kind == GRV_grammar.SYMBOL && is_visible(tree.grammar.rule_name[tree.grammar.arg[extra]])) {
+                    token_start.push(position);
+                    token_end.push(best);
+                    out.push(tree.add(tree.grammar.arg[extra], position, best, []));
+                }
+                position = best;
+                did_move = true;
+            }
+        }
+    }
+}
+
+bool Parser.can_match_symbol(int rule_index, List<int> out) {
+    GRV_grammar.Grammar grammar = tree.grammar;
+    int body = grammar.rule_body[rule_index];
+    int core = body;
+    while (grammar.kind[core] >= GRV_grammar.PREC) {
+        core = grammar.first[core];
+    }
+    int type_kind = grammar.kind[core];
+    bool is_terminal = type_kind == GRV_grammar.STRING || type_kind == GRV_grammar.PATTERN || type_kind == GRV_grammar.TOKEN || type_kind == GRV_grammar.IMMEDIATE_TOKEN;
+    int first_token = token_start.size();
+    List<int> kids = [];
+    if (!can_match(body, kids)) {
+        return false;
+    }
+    if (is_terminal) {
+        if (is_visible(grammar.rule_name[rule_index])) {
+            out.push(tree.add(rule_index, token_start[first_token], token_end[token_end.size() - 1], []));
+        }
+        return true;
+    }
+    if (!is_visible(grammar.rule_name[rule_index])) {
+        for (int kid in kids) {
+            out.push(kid);
+        }
+        return true;
+    }
+    int from = position;
+    int finish = position;
+    if (token_start.size() > first_token) {
+        from = token_start[first_token];
+        finish = token_end[token_end.size() - 1];
+    }
+    out.push(tree.add(rule_index, from, finish, kids));
+    return true;
+}
+
+bool Parser.can_match(int node, List<int> out) {
+    GRV_grammar.Grammar grammar = tree.grammar;
+    int type_kind = grammar.kind[node];
+    int saved = position;
+    int out_size = out.size();
+    int tokens = token_start.size();
+    if (type_kind == GRV_grammar.BLANK) {
+        return true;
+    }
+    if (type_kind == GRV_grammar.STRING || type_kind == GRV_grammar.PATTERN || type_kind == GRV_grammar.TOKEN) {
+        return can_match_token(node, true, out);
+    }
+    if (type_kind == GRV_grammar.IMMEDIATE_TOKEN) {
+        return can_match_token(node, false, out);
+    }
+    if (type_kind == GRV_grammar.SYMBOL) {
+        if (grammar.arg[node] < 0) {
+            return false;
+        }
+        if (can_match_symbol(grammar.arg[node], out)) {
+            return true;
+        }
+        restore(saved, out_size, tokens, out);
+        return false;
+    }
+    if (type_kind == GRV_grammar.SEQ) {
+        int member = grammar.first[node];
+        while (member >= 0) {
+            if (!can_match(member, out)) {
+                restore(saved, out_size, tokens, out);
+                return false;
+            }
+            member = grammar.next[member];
+        }
+        return true;
+    }
+    if (type_kind == GRV_grammar.CHOICE) {
+        int member = grammar.first[node];
+        while (member >= 0) {
+            if (can_match(member, out)) {
+                return true;
+            }
+            restore(saved, out_size, tokens, out);
+            member = grammar.next[member];
+        }
+        return false;
+    }
+    if (type_kind == GRV_grammar.REPEAT || type_kind == GRV_grammar.REPEAT1) {
+        int count = 0;
+        while (true) {
+            int before = position;
+            int mark = out.size();
+            int token_mark = token_start.size();
+            if (!can_match(grammar.first[node], out) || position == before) {
+                restore(before, mark, token_mark, out);
+                break;
+            }
+            count = count + 1;
+        }
+        if (type_kind == GRV_grammar.REPEAT1 && count == 0) {
+            restore(saved, out_size, tokens, out);
+            return false;
+        }
+        return true;
+    }
+    if (type_kind == GRV_grammar.FIELD || type_kind == GRV_grammar.ALIAS) {
+        if (!can_match(grammar.first[node], out)) {
+            restore(saved, out_size, tokens, out);
+            return false;
+        }
+        for (int i in out_size .. out.size()) {
+            if (type_kind == GRV_grammar.FIELD && tree.field[out[i]] < 0) {
+                tree.field[out[i]] = grammar.arg[node];
+            }
+            if (type_kind == GRV_grammar.ALIAS && grammar.flag[node] == 1) {
+                tree.alias[out[i]] = grammar.arg[node];
+            }
+        }
+        return true;
+    }
+    // PREC, PREC_LEFT, PREC_RIGHT, PREC_DYNAMIC: a PEG has no use for precedence
+    return can_match(grammar.first[node], out);
+}
+
+bool is_visible(str name) {
+    return !name.starts_with("_");
+}
+
+/// Parse `text` with the first rule of `grammar`. The tree's `root` is -1 and `error_at` the furthest offset reached when the text does not parse.
+pub Tree parse(GRV_grammar.Grammar grammar, str text) {
+    Tree tree = Tree(grammar);
+    GRV_lex.Lexer lexer = GRV_lex.Lexer(grammar);
+    lexer.text = text;
+    Parser parser = Parser(lexer, tree, text);
+    List<int> top = [];
+    if (parser.can_match_symbol(0, top)) {
+        parser.skip_extras(top);
+        if (parser.position == text.size() && top.size() == 1) {
+            tree.root = top[0];
+            tree.stop[tree.root] = text.size();
+            return tree;
+        }
+    }
+    tree.error_at = parser.furthest;
+    return tree;
+}

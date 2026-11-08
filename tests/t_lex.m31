@@ -1,0 +1,54 @@
+// Pattern and token matching: the regex subset and the position sets.
+
+import core.GRV_grammar;
+import core.GRV_lex;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+// the longest match of rule `name` of the grammar `rules` at the start of `text`, or -1
+int longest(str rules, str name, str text) {
+    str grammar_text = "{\"name\": \"t\", \"rules\": " + rules + ", \"extras\": []}";
+    match (GRV_grammar.load(grammar_text)) {
+        case Ok(GRV_grammar.Grammar grammar): {
+            GRV_lex.Lexer lexer = GRV_lex.Lexer(grammar);
+            lexer.text = text;
+            int body = grammar.rule_body[grammar.rule_index.get(name).or(0)];
+            int best = -1;
+            for (int end_at in lexer.ends(body, [0])) {
+                if (end_at > best) {
+                    best = end_at;
+                }
+            }
+            return best;
+        }
+        case Err(str reason): {
+            print(reason);
+            return -2;
+        }
+    }
+}
+
+int pattern(str regex, str text) {
+    str escaped = regex.split("\\").join("\\\\").split("\"").join("\\\"");
+    return longest("{\"a\": {\"type\": \"PATTERN\", \"value\": \"" + escaped + "\"}}", "a", text);
+}
+
+check.eq_int("literal class run", pattern("[a-c]+", "abcabcd"), 6);
+check.eq_int("no match", pattern("[a-c]+", "xyz"), -1);
+check.eq_int("digits", pattern("\\d+", "2024-01"), 4);
+check.eq_int("optional group", pattern("-?(0|[1-9]\\d*)", "-120x"), 4);
+check.eq_int("alternation, longest", pattern("a|ab|abc", "abcd"), 3);
+check.eq_int("negated class", pattern("[^\\\\\"\\n]+", "abc\"d"), 3);
+check.eq_int("dot stops at newline", pattern(".*", "ab\ncd"), 2);
+check.eq_int("counted repeat", pattern("\\d{2,3}", "12345"), 3);
+check.eq_int("counted repeat min", pattern("\\d{2,3}", "1"), -1);
+check.eq_int("block comment body", pattern("[^*]*\\*+([^/*][^*]*\\*+)*", "ab * c **/ rest"), 9);
+check.eq_int("space shorthand", pattern("\\s+", " \t\nx"), 3);
+check.eq_int("word shorthand in class", pattern("[\\w$]+", "ab_9$ c"), 5);
+check.eq_int("unsupported \\p{..} never matches", pattern("\\p{L}+", "abc"), -1);
+str rules = "{\"n\": {\"type\": \"TOKEN\", \"content\": {\"type\": \"SEQ\", \"members\": [{\"type\": \"STRING\", \"value\": \"0x\"}, {\"type\": \"PATTERN\", \"value\": \"[0-9a-f]+\"}]}}, \"w\": {\"type\": \"REPEAT1\", \"content\": {\"type\": \"STRING\", \"value\": \"ab\"}}}";
+check.eq_int("TOKEN of SEQ", longest(rules, "n", "0xff!"), 4);
+check.eq_int("TOKEN of SEQ, prefix only", longest(rules, "n", "0x"), -1);
+check.eq_int("REPEAT1 of STRING", longest(rules, "w", "ababa"), 4);
+check.finish();

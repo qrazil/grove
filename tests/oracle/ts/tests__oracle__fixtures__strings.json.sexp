@@ -1,0 +1,22 @@
+@@ json tests/oracle/fixtures/strings.json
+(document	0-88
+  (array	0-87
+    (string	1-3)
+    (string	5-12
+      (string_content	6-11))
+    (string	14-50
+      (string_content	15-49
+        (escape_sequence	19-21)
+        (escape_sequence	22-24)
+        (escape_sequence	25-27)
+        (escape_sequence	28-30)
+        (escape_sequence	31-33)
+        (escape_sequence	34-36)
+        (escape_sequence	37-39)
+        (escape_sequence	40-42)
+        (escape_sequence	43-45)))
+    (string	52-62
+      (string_content	53-61
+        (escape_sequence	56-58)))
+    (string	64-86
+      (string_content	65-85))))

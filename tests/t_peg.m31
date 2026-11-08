@@ -1,0 +1,33 @@
+// The PEG prototype: what it refuses, and extras.
+
+import core.GRV_grammar;
+import core.GRV_peg;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+match (io.read("tests/data/json/grammar.json")) {
+    case Err(io.Error failure): {
+        check.ok("read grammar", false);
+    }
+    case Ok(str text): {
+        match (GRV_grammar.load(text)) {
+            case Err(str reason): {
+                check.ok("load: " + reason, false);
+            }
+            case Ok(GRV_grammar.Grammar grammar): {
+                GRV_peg.Tree bad = GRV_peg.parse(grammar, "[1, 2");
+                check.ok("unclosed array has no tree", bad.root < 0);
+                check.eq_int("and reports how far it got", bad.error_at, 5);
+                GRV_peg.Tree junk = GRV_peg.parse(grammar, "[1] x");
+                check.ok("trailing junk has no tree", junk.root < 0);
+                GRV_peg.Tree comment = GRV_peg.parse(grammar, "// head\n[1, /* mid */ 2]\n");
+                check.ok("comments are extras", comment.root >= 0);
+                check.ok("and keep their place in the tree", comment.root >= 0 && comment.sexp().contains("(comment"));
+                GRV_peg.Tree empty = GRV_peg.parse(grammar, "");
+                check.ok("the empty text is not a document", empty.root < 0);
+            }
+        }
+    }
+}
+check.finish();

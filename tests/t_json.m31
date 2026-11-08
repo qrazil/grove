@@ -1,0 +1,43 @@
+// The order-preserving JSON reader.
+
+import core.GRV_json;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+match (GRV_json.read("{\"z\": 1, \"a\": [true, null, \"x\\n\\u00e9\"], \"m\": {}}")) {
+    case Ok(GRV_json.Doc doc): {
+        check.eq_int("root is an object", doc.kind[0], GRV_json.OBJECT);
+        int member = doc.first[0];
+        check.eq_str("first key is z, not the hash order's", doc.strings[doc.key[member]], "z");
+        member = doc.next[member];
+        check.eq_str("second key", doc.strings[doc.key[member]], "a");
+        int items = doc.member(0, "a");
+        check.eq_int("array kind", doc.kind[items], GRV_json.ARRAY);
+        int item = doc.next[doc.next[doc.first[items]]];
+        check.eq_str("string escapes", doc.text(item), "x\né");
+        check.eq_int("missing member", doc.member(0, "nope"), -1);
+        check.eq_int("empty object has no child", doc.first[doc.member(0, "m")], -1);
+        check.eq_int("number", doc.value[doc.member(0, "z")], 1);
+    }
+    case Err(int offset): {
+        check.ok("read a valid document", false);
+    }
+}
+
+void bad(GRV_check.Check check, str name, str text) {
+    match (GRV_json.read(text)) {
+        case Ok(GRV_json.Doc doc): {
+            check.ok(name, false);
+        }
+        case Err(int offset): {
+            check.ok(name, true);
+        }
+    }
+}
+
+bad(check, "unterminated string", "\"abc");
+bad(check, "missing colon", "{\"a\" 1}");
+bad(check, "trailing garbage", "[1] x");
+bad(check, "unclosed array", "[1, 2");
+bad(check, "empty", "");
+check.finish();

@@ -1,0 +1,67 @@
+/* Load-time and first-parse numbers.
+ *
+ *   bench GRAMMAR.json [TEXT]
+ *
+ * Prints how long reading and lowering the grammar took, and (with TEXT) how
+ * long the PEG prototype takes to parse the file. Not run by test.sh except
+ * with --bench; a time is not a fixture, nothing compares it. */
+
+import core.GRV_grammar;
+import core.GRV_json;
+import core.GRV_peg;
+import io;
+import os;
+import timer;
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            print("cannot read " + path + ": " + failure.to_str());
+            os.exit(1);
+            return "";
+        }
+    }
+}
+
+int elapsed_ms(int from_ns) {
+    return (timer.monotonic_ns() - from_ns) / 1000000;
+}
+
+List<str> argv = os.arguments();
+if (argv.size() < 2) {
+    print("usage: bench GRAMMAR.json [TEXT]");
+    os.exit(2);
+}
+str source = slurp(argv[1]);
+int began_json = timer.monotonic_ns();
+match (GRV_json.read(source)) {
+    case Ok(GRV_json.Doc doc): {
+        print("json read: " + str(source.size()) + " bytes, " + str(doc.kind.size()) + " nodes, " + str(elapsed_ms(began_json)) + " ms");
+    }
+    case Err(int offset): {
+        print("not JSON at " + str(offset));
+        os.exit(1);
+    }
+}
+int began_load = timer.monotonic_ns();
+match (GRV_grammar.load(source)) {
+    case Err(str reason): {
+        print(reason);
+    }
+    case Ok(GRV_grammar.Grammar grammar): {
+        print("grammar load (read + lower): " + grammar.name + ", " + str(grammar.rule_name.size()) + " rules, " + str(grammar.kind.size()) + " rule nodes, " + str(elapsed_ms(began_load)) + " ms");
+        if (argv.size() > 2) {
+            str text = slurp(argv[2]);
+            int began_parse = timer.monotonic_ns();
+            GRV_peg.Tree tree = GRV_peg.parse(grammar, text);
+            if (tree.root >= 0) {
+                print("peg parse: " + str(text.size()) + " bytes, " + str(tree.rule.size()) + " tree nodes, " + str(elapsed_ms(began_parse)) + " ms");
+            } else {
+                print("peg parse failed at byte " + str(tree.error_at));
+            }
+        }
+    }
+}
