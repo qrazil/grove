@@ -43,10 +43,10 @@ match (io.read(argv[1])) {
                         case Ok(str source): {
                             GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
                             print("@@ " + argv[cursor]);
-                            if (tree.root >= 0) {
+                            if (!tree.has_errors()) {
                                 print(tree.sexp());
                             } else {
-                                print("!! " + argv[cursor] + ": error at " + str(tree.error_at));
+                                print("!! " + argv[cursor] + ": the tree has errors");
                             }
                         }
                     }

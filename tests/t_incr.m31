@@ -1,0 +1,124 @@
+/* Incremental reparse: after any edit, reusing the old tree must give exactly the tree a
+ * parse from scratch gives (every node, hidden ones included), while reading far fewer
+ * tokens. Edits come from a fixed pseudo-random sequence (a linear congruential
+ * generator), so a failure names the step and repeats. Counts are compared, never times. */
+
+import core.GRV_edit;
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+type Random {
+    int state;
+}
+
+int Random.next(int bound) {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    return (state / 65536) % bound;
+}
+
+Option<GRV_lexer.Lexer> lexer_of(str path) {
+    match (io.read(path)) {
+        case Err(io.Error failure): {
+            return Option<GRV_lexer.Lexer>.None;
+        }
+        case Ok(str text): {
+            match (GRV_grammar.load(text)) {
+                case Err(str reason): {
+                    return Option<GRV_lexer.Lexer>.None;
+                }
+                case Ok(GRV_grammar.Grammar grammar): {
+                    return Option<GRV_lexer.Lexer>.Some(GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar))));
+                }
+            }
+        }
+    }
+}
+
+/* Apply `steps` random edits to `source`, comparing at each step; returns the number of steps
+ * whose two trees differed, and adds the token counts to `counts` = [incremental, scratch, reused nodes]. */
+int run(GRV_lexer.Lexer lexer, str source, int seed, int steps, int most_removed, List<str> snippets, List<int> counts) {
+    Random random = Random(seed);
+    GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
+    str text = source;
+    int mismatches = 0;
+    for (int step in 0 .. steps) {
+        int start = random.next(text.size() + 1);
+        int removed = random.next(most_removed + 1);
+        if (start + removed > text.size()) {
+            removed = text.size() - start;
+        }
+        // keep edits on character boundaries: move to the next ASCII byte
+        while (start < text.size() && (text.byte_at(start) & 192) == 128) {
+            start = start + 1;
+        }
+        while (start + removed < text.size() && (text.byte_at(start + removed) & 192) == 128) {
+            removed = removed + 1;
+        }
+        str added = snippets[random.next(snippets.size())];
+        str changed = text.substr(0, start) + added + text.substr(start + removed, text.size());
+        GRV_edit.apply(tree, start, start + removed, start + added.size());
+        GRV_glr.Parser parser = GRV_glr.begin(lexer, changed, Option<GRV_tree.Tree>.Some(tree));
+        parser.has_finished_after(9223372036854775807);
+        GRV_glr.Parser fresh = GRV_glr.begin(lexer, changed, Option<GRV_tree.Tree>.None);
+        fresh.has_finished_after(9223372036854775807);
+        if (parser.tree.full() != fresh.tree.full() || parser.tree.has_errors() != fresh.tree.has_errors()) {
+            mismatches = mismatches + 1;
+            if (mismatches == 1) {
+                print("first mismatch at step " + str(step) + ": edit [" + str(start) + ", " + str(start + removed) + ") -> [" + added + "]");
+            }
+        }
+        counts[0] = counts[0] + parser.lexed_tokens;
+        counts[1] = counts[1] + fresh.lexed_tokens;
+        counts[2] = counts[2] + parser.reused_nodes;
+        tree = parser.tree;
+        text = changed;
+    }
+    return mismatches;
+}
+
+str records(int count) {
+    List<str> items = [];
+    for (int index in 0 .. count) {
+        items.push("  {\"id\": " + str(index) + ", \"name\": \"item " + str(index) + "\", \"tags\": [\"a\", \"b\"], \"ok\": true}");
+    }
+    return "[\n" + items.join(",\n") + "\n]\n";
+}
+
+str functions(int count) {
+    str one = "int f(int a) {\n    if (a > 1) {\n        return a * 2;\n    }\n    return a;\n}\n\n";
+    return "#include <stdio.h>\n\n" + one.repeat(count);
+}
+
+void exercise(GRV_check.Check check, str name, str grammar_path, str source, int seed, List<str> hostile, List<str> benign) {
+    match (lexer_of(grammar_path)) {
+        case None: {
+            check.ok(name + ": load the grammar", false);
+        }
+        case Some(GRV_lexer.Lexer lexer): {
+            // edits that break and mend the syntax: only equality is asked
+            List<int> rough = [0, 0, 0];
+            check.eq_int(name + ": incremental equals scratch over 80 hostile edits", run(lexer, source, seed, 80, 2, hostile, rough), 0);
+            check.ok(name + ": nodes were reused", rough[2] > 0);
+            // edits that leave the syntax alone: the incremental parses must read far fewer tokens
+            List<int> calm = [0, 0, 0];
+            check.eq_int(name + ": incremental equals scratch over 60 benign edits", run(lexer, source, seed + 1, 60, 0, benign, calm), 0);
+            check.ok(name + ": benign edits read under a third of the tokens", calm[0] * 3 < calm[1]);
+            // the arena keeps old versions; compaction gives them back without changing the tree
+            GRV_tree.Tree whole = GRV_glr.parse(lexer, source);
+            check.eq_str(name + ": compaction keeps the tree", whole.compact().full(), whole.full());
+            check.ok(name + ": and never grows it", whole.compact().arena_size() <= whole.arena_size());
+        }
+    }
+}
+
+exercise(check, "json", "tests/data/json/grammar.json", records(60), 7, ["", " ", "\n", "1", "x", ",", "\"", "[", "]", "{", "}", ":", "true", "\"k\": 1,"], ["", " ", "\n", "1", "22", "0"]);
+exercise(check, "c", "tests/data/c/grammar.json", functions(25), 11, ["", " ", "\n", "1", "x", ";", "(", ")", "{", "}", "/* c */", "int x;", "a = b;", "\n#define A 1\n"], ["", " ", "\n", "1", "/* c */", "  "]);
+check.finish();

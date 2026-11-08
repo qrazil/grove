@@ -3,7 +3,7 @@
 
   compare.py --dump GROVE_DUMP_TREE --grammar GRAMMAR.json --ts-dir DIR [--lang L] PATH...
 
-PATH are source files; DIR holds tree-sitter's dumps (`PATH.sexp`, slashes written
+PATH are source files (an argument `@FILE` stands for the lines of FILE); DIR holds tree-sitter's dumps (`PATH.sexp`, slashes written
 as `__`, made by dump_sexp.lua). Files whose tree-sitter dump contains ERROR or
 MISSING are skipped (the oracle compares valid input only). Prints one line per
 file and a summary; exits 1 if any compared file differs.
@@ -19,6 +19,13 @@ def main():
     ap.add_argument('paths', nargs='+')
     ap.add_argument('--quiet', action='store_true')
     args = ap.parse_args()
+    expanded = []
+    for p in args.paths:
+        if p.startswith('@'):
+            expanded += [l.rstrip('\n') for l in open(p[1:]) if l.strip()]
+        else:
+            expanded.append(p)
+    args.paths = expanded
     want = {}
     for p in args.paths:
         f = os.path.join(args.ts_dir, p.replace('/', '__') + '.sexp')

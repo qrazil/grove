@@ -71,8 +71,8 @@ for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
         }
         case Some(GRV_lexer.Lexer lexer): {
             GRV_tree.Tree tree = GRV_glr.parse(lexer, read_or_empty(path));
-            if (tree.root < 0) {
-                check.ok(path + ": parse failed at byte " + str(tree.error_at), false);
+            if (tree.has_errors()) {
+                check.ok(path + ": the tree has errors", false);
             } else {
                 check.eq_str(path, tree.sexp(), want);
             }

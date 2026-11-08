@@ -61,8 +61,8 @@ str parse_to_shape(str grammar_name, str source) {
         }
         case Some(GRV_lexer.Lexer lexer): {
             GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
-            if (tree.root < 0) {
-                return "error at " + str(tree.error_at);
+            if (tree.has_errors()) {
+                return "errors: " + shape(tree.sexp());
             }
             return shape(tree.sexp());
         }
@@ -75,8 +75,8 @@ check.eq_str("higher precedence binds tighter", parse_to_shape("expr", "1-2*3"),
 check.eq_str("and on the left too", parse_to_shape("expr", "1*2-3"), "(program (binary (binary (number) (number)) (number)))");
 check.eq_str("right associative", parse_to_shape("expr", "1^2^3"), "(program (binary (number) (binary (number) (number))))");
 check.eq_str("whitespace is an extra", parse_to_shape("expr", " 1 -\n 2 "), "(program (binary (number) (number)))");
-check.eq_str("a missing operand fails where it is", parse_to_shape("expr", "1-"), "error at 2");
-check.eq_str("an unknown character fails where it is", parse_to_shape("expr", "1 + 2"), "error at 2");
+check.eq_str("a missing operand leaves an ERROR", parse_to_shape("expr", "1-"), "errors: (ERROR (number))");
+check.eq_str("an unknown character is skipped inside an ERROR", parse_to_shape("expr", "1 + 2"), "errors: (program (number) (ERROR))");
 check.eq_str("dynamic precedence picks a", parse_to_shape("dyn_a", "x;"), "(program (a))");
 check.eq_str("dynamic precedence picks b", parse_to_shape("dyn_b", "x;"), "(program (b))");
 check.eq_str("fields and a comment extra between children", parse_to_shape("extras", "let a = 1; # one\nlet b = 2;"), "(program (item name: (name) (number)) (comment) (item name: (name) (number)))");
@@ -89,7 +89,7 @@ int nodes_of(str source) {
             return 0;
         }
         case Some(GRV_lexer.Lexer lexer): {
-            return GRV_glr.parse(lexer, source).node_symbol.size();
+            return GRV_glr.parse(lexer, source).compact().arena_size();
         }
     }
 }

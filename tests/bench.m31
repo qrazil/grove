@@ -6,6 +6,7 @@
  * long the PEG prototype takes to parse the file. Not run by test.sh except
  * with --bench; a time is not a fixture, nothing compares it. */
 
+import core.GRV_edit;
 import core.GRV_glr;
 import core.GRV_grammar;
 import core.GRV_lang;
@@ -66,14 +67,49 @@ match (GRV_grammar.load(source)) {
             print("tables: " + str(elapsed_ms(began_tables)) + " ms");
             int began_glr = timer.monotonic_ns();
             GRV_tree.Tree glr_tree = GRV_glr.parse(lexer, text);
-            if (glr_tree.root >= 0) {
+            if (!glr_tree.has_errors()) {
                 print("glr parse (cold lexer): " + str(text.size()) + " bytes, " + str(glr_tree.node_symbol.size()) + " tree nodes, " + str(elapsed_ms(began_glr)) + " ms, " + str(lexer.dfa_states) + " dfa states");
             } else {
-                print("glr parse failed at byte " + str(glr_tree.error_at));
+                print("glr parse found errors");
             }
             int began_again = timer.monotonic_ns();
             GRV_glr.parse(lexer, text);
             print("glr parse (warm lexer): " + str(elapsed_ms(began_again)) + " ms");
+            if (!glr_tree.has_errors()) {
+                // one inserted space, in the middle, ten times (each on the previous result)
+                int middle = text.size() / 2;
+                while (text.byte_at(middle) != 32 && text.byte_at(middle) != 10) {
+                    middle = middle + 1;
+                }
+                str current = text;
+                int total_apply = 0;
+                int total_reparse = 0;
+                int worst_reparse = 0;
+                int reused = 0;
+                int lexed = 0;
+                int copied = 0;
+                for (int round in 0 .. 10) {
+                    str changed = current.substr(0, middle) + " " + current.substr(middle, current.size());
+                    int began_edit = timer.monotonic_ns();
+                    copied = copied + GRV_edit.apply(glr_tree, middle, middle, middle + 1);
+                    total_apply = total_apply + (timer.monotonic_ns() - began_edit);
+                    int began_reparse = timer.monotonic_ns();
+                    GRV_glr.Parser parser = GRV_glr.begin(lexer, changed, Option<GRV_tree.Tree>.Some(glr_tree));
+                    parser.has_finished_after(9223372036854775807);
+                    int took = timer.monotonic_ns() - began_reparse;
+                    total_reparse = total_reparse + took;
+                    if (took > worst_reparse) {
+                        worst_reparse = took;
+                    }
+                    reused = reused + parser.reused_nodes;
+                    lexed = lexed + parser.lexed_tokens;
+                    current = changed;
+                }
+                print("edit + reparse, 10 one-space insertions mid-file: apply avg " + str(total_apply / 10000) + " us, reparse avg " + str(total_reparse / 10000) + " us, worst " + str(worst_reparse / 1000) + " us; per edit " + str(copied / 10) + " nodes copied, " + str(reused / 10) + " reused, " + str(lexed / 10) + " tokens lexed");
+                int began_compact = timer.monotonic_ns();
+                GRV_tree.Tree small = glr_tree.compact();
+                print("compact: " + str(glr_tree.arena_size()) + " -> " + str(small.arena_size()) + " nodes, " + str(elapsed_ms(began_compact)) + " ms");
+            }
             if (text.size() < 300000 && grammar.name == "json") {
                 int began_parse = timer.monotonic_ns();
                 GRV_peg.Tree tree = GRV_peg.parse(grammar, text);

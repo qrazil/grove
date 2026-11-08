@@ -1,0 +1,114 @@
+/* Resumable parsing and error recovery.
+ *
+ * step(0) stops after eight rounds, so slicing is deterministic and needs no clock. The
+ * fuzz part feeds pseudo-random text to the parser and checks only invariants: it finishes
+ * (the parser cannot hang), the tree has a root, and the root covers the whole input. */
+
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+Option<GRV_lexer.Lexer> lexer_of(str path) {
+    match (io.read(path)) {
+        case Err(io.Error failure): {
+            return Option<GRV_lexer.Lexer>.None;
+        }
+        case Ok(str text): {
+            match (GRV_grammar.load(text)) {
+                case Err(str reason): {
+                    return Option<GRV_lexer.Lexer>.None;
+                }
+                case Ok(GRV_grammar.Grammar grammar): {
+                    return Option<GRV_lexer.Lexer>.Some(GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar))));
+                }
+            }
+        }
+    }
+}
+
+match (lexer_of("tests/data/json/grammar.json")) {
+    case None: {
+        check.ok("load the json grammar", false);
+    }
+    case Some(GRV_lexer.Lexer lexer): {
+        str source = "[\n" + "{\"a\": [1, 2, 3], \"b\": null},\n".repeat(40) + "{}\n]\n";
+        // slicing
+        GRV_glr.Parser sliced = GRV_glr.begin(lexer, source, Option<GRV_tree.Tree>.None);
+        int calls = 1;
+        while (!sliced.has_finished_after(0)) {
+            calls = calls + 1;
+        }
+        check.ok("a zero budget gives many slices", calls > 10);
+        check.eq_str("and the sliced parse equals the whole one", sliced.tree.full(), GRV_glr.parse(lexer, source).full());
+        check.ok("a finished parser stays finished", sliced.has_finished_after(0) && sliced.is_done);
+        // recovery keeps what it can
+        GRV_tree.Tree missing = GRV_glr.parse(lexer, "[1, 2");
+        check.ok("an unclosed array is an error", missing.has_errors());
+        check.eq_int("whose tree covers the input", missing.padding[missing.root] + missing.size[missing.root], 5);
+        GRV_tree.Tree comma = GRV_glr.parse(lexer, "{\"a\": 1 \"b\": 2, \"c\": [3]}");
+        check.ok("a missing comma is an error", comma.has_errors());
+        check.ok("and the pairs around it survive", comma.sexp().contains("(pair") && comma.sexp().contains("(array"));
+        check.ok("valid text has no error", !GRV_glr.parse(lexer, source).has_errors());
+        // fuzz: pseudo-random text over the characters of JSON and a few others
+        str alphabet = "{}[]:,\" \n0123456789abe.-\\u/*#@";
+        int state = 12345;
+        int finished = 0;
+        int covered = 0;
+        for (int round in 0 .. 150) {
+            List<str> pieces = [];
+            state = (state * 1103515245 + 12345) % 2147483648;
+            int length = (state / 65536) % 40;
+            for (int index in 0 .. length) {
+                state = (state * 1103515245 + 12345) % 2147483648;
+                int pick = (state / 65536) % alphabet.size();
+                pieces.push(alphabet.substr(pick, pick + 1));
+            }
+            str text = pieces.join("");
+            GRV_tree.Tree tree = GRV_glr.parse(lexer, text);
+            if (tree.root >= 0) {
+                finished = finished + 1;
+                if (tree.padding[tree.root] + tree.size[tree.root] == text.size()) {
+                    covered = covered + 1;
+                }
+            }
+        }
+        check.eq_int("fuzz: every parse finished with a root", finished, 150);
+        check.eq_int("fuzz: every root covers its input", covered, 150);
+    }
+}
+match (lexer_of("tests/data/c/grammar.json")) {
+    case None: {
+        check.ok("load the c grammar", false);
+    }
+    case Some(GRV_lexer.Lexer lexer): {
+        str alphabet = "int x=1;(){}[],*&/ \n#\"'abc<>.;";
+        int state = 777;
+        int finished = 0;
+        for (int round in 0 .. 150) {
+            List<str> pieces = [];
+            state = (state * 1103515245 + 12345) % 2147483648;
+            int length = (state / 65536) % 60;
+            for (int index in 0 .. length) {
+                state = (state * 1103515245 + 12345) % 2147483648;
+                int pick = (state / 65536) % alphabet.size();
+                pieces.push(alphabet.substr(pick, pick + 1));
+            }
+            GRV_tree.Tree tree = GRV_glr.parse(lexer, pieces.join(""));
+            if (tree.root >= 0) {
+                finished = finished + 1;
+            }
+        }
+        check.eq_int("fuzz (c): every parse finished with a root", finished, 150);
+        GRV_tree.Tree broken = GRV_glr.parse(lexer, "int main() {\n    int x = ;\n    return x;\n}\nint y;\n");
+        check.ok("a bad initialiser is an error", broken.has_errors());
+        check.ok("and the declaration after it survives", broken.sexp().contains("declarator: (identifier\t"));
+    }
+}
+check.finish();
