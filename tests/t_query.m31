@@ -1,0 +1,131 @@
+/* Queries (GRV_query): syntax errors, patterns, fields, captures, alternations, quantifiers, anchors,
+ * predicates and directives, on small json and lua sources. The agreement with nvim over the fixtures
+ * is t_query_oracle. */
+
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_query;
+import core.GRV_tree;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+GRV_lexer.Lexer lexer_for(str language) {
+    match (GRV_grammar.load(read_or_empty("tests/data/" + language + "/grammar.json"))) {
+        case Err(str reason): {
+            print("no grammar: " + reason);
+            return GRV_lexer.make(GRV_lr.build(GRV_lang.build(GRV_grammar.Grammar())));
+        }
+        case Ok(GRV_grammar.Grammar grammar): {
+            return GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar)));
+        }
+    }
+}
+
+GRV_lexer.Lexer json = lexer_for("json");
+GRV_lexer.Lexer lua = lexer_for("lua");
+
+/// "name=text" of every capture, comma separated, in the order `run` gives
+str caps(GRV_lexer.Lexer lexer, str source, str pattern) {
+    GRV_query.Query query = GRV_query.parse(pattern);
+    if (query.is_failed) {
+        return "FAILED " + query.error_text;
+    }
+    GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
+    List<str> parts = [];
+    for (GRV_query.Found one in GRV_query.run(query, tree, source, 0, source.size())) {
+        parts.push(one.name + "=" + source.substr(one.start, one.stop));
+    }
+    return parts.join(",");
+}
+
+bool is_failing(str pattern) {
+    return GRV_query.parse(pattern).is_failed;
+}
+
+// syntax errors
+check.ok("unbalanced paren", is_failing("(pair"));
+check.ok("unknown capture start", is_failing("(pair) @"));
+check.ok("empty is fine", !is_failing(""));
+check.ok("comment only is fine", !is_failing("; nothing here\n"));
+check.ok("unterminated string", is_failing("\"abc"));
+check.ok("predicate needs a capture", !is_failing("((number) @n (#eq? @n \"1\"))"));
+// plain patterns and captures
+str doc = "{\"a\": 1, \"b\": [true, null, 2], \"c\": {\"d\": \"x\"}}";
+check.eq_str("named node", caps(json, doc, "(number) @n"), "n=1,n=2");
+check.eq_str("two captures", caps(json, doc, "(true) @t (null) @z"), "t=true,z=null");
+check.eq_str("nested", caps(json, doc, "(pair (string) (array (number) @n))"), "n=2");
+check.eq_str("anonymous token", caps(json, doc, "\"[\" @open"), "open=[");
+check.eq_str("wildcard named", caps(json, "[1]", "(array (_) @item)"), "item=1");
+check.eq_str("wildcard any", caps(json, "[1]", "(array _ @item)"), "item=[,item=1,item=]");
+check.eq_str("capture on parent", caps(json, "[1,2]", "(array) @a"), "a=[1,2]");
+// fields
+check.eq_str("field", caps(json, doc, "(pair key: (string) @k)"), "k=\"a\",k=\"b\",k=\"c\",k=\"d\"");
+check.eq_str("field value", caps(json, "{\"a\": 1}", "(pair value: (number) @v)"), "v=1");
+check.eq_str("wrong field", caps(json, "{\"a\": 1}", "(pair key: (number) @v)"), "");
+check.eq_str("negated field", caps(lua, "local a = 1\nlocal b", "(variable_declaration (assignment_statement) @with)"), "with=a = 1");
+// alternation and groups
+check.eq_str("alternation", caps(json, doc, "[(true) (null)] @v"), "v=true,v=null");
+check.eq_str("alternation inside", caps(json, "[true, 1]", "(array [(true) (number)] @v)"), "v=true,v=1");
+check.eq_str("group sequence", caps(json, "[1, true, 2]", "(array ((number) @a (true) @b))"), "a=1,b=true");
+// quantifiers
+check.eq_str("plus", caps(json, "[1, 2, 3]", "(array (number)+ @n)"), "n=1,n=2,n=3");
+check.eq_str("optional", caps(json, "[1]", "(array (number) @n (true)? @t)"), "n=1");
+check.eq_str("star none", caps(json, "[]", "(array (number)* @n)"), "");
+// anchors
+check.eq_str("first child anchor", caps(json, "[1, 2, 3]", "(array . (number) @n)"), "n=1");
+check.eq_str("last child anchor", caps(json, "[1, 2, 3]", "(array (number) @n .)"), "n=3");
+check.eq_str("adjacent anchor", caps(json, "[1, true, 2]", "(array (number) @a . (true) @b)"), "a=1,b=true");
+// predicates
+check.eq_str("eq", caps(json, "[1, 2]", "((number) @n (#eq? @n \"2\"))"), "n=2");
+check.eq_str("not-eq", caps(json, "[1, 2]", "((number) @n (#not-eq? @n \"2\"))"), "n=1");
+check.eq_str("match", caps(json, "[\"ab\", \"cd\"]", "((string) @s (#match? @s \"^.a\"))"), "s=\"ab\"");
+check.eq_str("not-match", caps(json, "[\"ab\", \"cd\"]", "((string) @s (#not-match? @s \"^.a\"))"), "s=\"cd\"");
+check.eq_str("lua-match", caps(json, "[\"ab\", \"cd\"]", "((string) @s (#lua-match? @s \"^.c\"))"), "s=\"cd\"");
+check.eq_str("any-of", caps(json, "[1, 2, 3]", "((number) @n (#any-of? @n \"1\" \"3\"))"), "n=1,n=3");
+check.eq_str("eq two captures", caps(json, "[[1, 1], [1, 2]]", "((array (number) @a (number) @b) (#eq? @a @b))"), "a=1,b=1");
+check.eq_str("has-ancestor", caps(json, "{\"a\": [1]}", "((number) @n (#has-ancestor? @n pair))"), "n=1");
+check.eq_str("not-has-ancestor", caps(json, "[1, {\"a\": 2}]", "((number) @n (#not-has-ancestor? @n pair))"), "n=1");
+// directives
+GRV_query.Query with_set = GRV_query.parse("((number) @n (#set! priority 95))");
+check.ok("set! parses", !with_set.is_failed);
+check.eq_str("set! stored", with_set.properties[0].get("priority").or(""), "95");
+GRV_query.Query with_offset = GRV_query.parse("((string) @s (#offset! @s 0 1 0 -1))");
+GRV_tree.Tree offset_tree = GRV_glr.parse(json, "[\"abc\"]");
+List<GRV_query.Found> shifted = GRV_query.run(with_offset, offset_tree, "[\"abc\"]", 0, 7);
+check.eq_int("offset! count", shifted.size(), 1);
+if (shifted.size() == 1) {
+    List<str> shown = [];
+    for (int one in shifted[0].offset) {
+        shown.push(str(one));
+    }
+    check.eq_str("offset! values", shown.join(","), "0,1,0,-1");
+}
+// order and ranges
+check.eq_str("longer first at same start", caps(json, "[[1]]", "(array) @a"), "a=[[1]],a=[1]");
+GRV_query.Query ranged = GRV_query.parse("(number) @n");
+GRV_tree.Tree ranged_tree = GRV_glr.parse(json, "[1, 2, 3]");
+check.eq_int("byte range", GRV_query.run(ranged, ranged_tree, "[1, 2, 3]", 4, 5).size(), 1);
+// lua
+check.eq_str("lua call", caps(lua, "print(1)\nfoo(2)", "(function_call name: (identifier) @f)"), "f=print,f=foo");
+check.eq_str("lua keyword", caps(lua, "if x then end", "\"if\" @k \"then\" @k \"end\" @k"), "k=if,k=then,k=end");
+check.eq_str("lua statement semicolon", caps(lua, "local x;", "(empty_statement \";\" @d)"), "d=;");
+// the error node
+check.ok("ERROR pattern parses", !is_failing("(ERROR) @e"));
+check.eq_str("no ERROR in a clean tree", caps(json, "[1]", "(ERROR) @e"), "");
+check.finish();

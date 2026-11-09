@@ -1,0 +1,936 @@
+/* Tree-sitter queries: the subset real highlight files use.
+ *
+ *   (type child ...)   (_)   _   "text"   (a/b) is not supported
+ *   field: pattern     !field            negated field of the parent
+ *   [ a b c ]          alternation
+ *   ((a) (b))          a group: one pattern, or siblings in order
+ *   pattern ? * +      quantifiers on a child
+ *   .                  anchors: first child, last child, immediate sibling (anonymous nodes are skipped)
+ *   @name              captures, any number after a pattern
+ *   (#eq? @a "x")  (#eq? @a @b)  (#not-eq? ..)  (#any-eq? ..)  (#match? @a "re")  (#lua-match? @a "pat")
+ *   (#any-of? @a "x" "y")  (#has-ancestor? @a type ...)  (#has-parent? @a type ...)  and their `not-` forms
+ *   (#set! key value)  (#offset! @a rows cols rows cols)     directives
+ *   (ERROR)            the nodes where the parser recovered
+ *
+ * The tree a query sees is the visible one: hidden nodes (rules that start with `_`, repeats, inlined
+ * and supertype nodes) are replaced by their children, aliases rename, and anonymous tokens are nodes
+ * that `"text"` matches. Matching enumerates every way a pattern fits (tree-sitter does too); a
+ * match whose predicates fail is dropped as a whole. `run` returns the captures of all matches inside
+ * a byte range, sorted by start, then longer first, then pattern number.
+ *
+ * Not done: supertype syntax `(a/b)`, `(MISSING)`, field-less `.` between a node and its parent's
+ * edge when anonymous tokens are inside, quantified groups, `#is?` and the editor-defined
+ * predicates other than those listed (an unknown predicate is taken as true).
+ *
+ * Comparison with nvim's own captures for json, c and lua: docs/SPEC.md section 18. */
+
+import core.GRV_find;
+import core.GRV_lang;
+import core.GRV_tree;
+
+const int T_OPEN = 0;
+const int T_CLOSE = 1;
+const int T_BRACKET_OPEN = 2;
+const int T_BRACKET_CLOSE = 3;
+const int T_STRING = 4;
+const int T_NAME = 5;
+const int T_CAPTURE = 6;
+const int T_PREDICATE = 7;
+const int T_DOT = 8;
+const int T_STAR = 9;
+const int T_PLUS = 10;
+const int T_QUESTION = 11;
+const int T_BANG = 12;
+const int T_FIELD = 13;
+const int K_NAMED = 0;
+const int K_ANON = 1;
+const int K_WILD_NAMED = 2;
+const int K_WILD_ANY = 3;
+const int K_ALT = 4;
+const int K_GROUP = 5;
+const int K_ERROR = 6;
+const int Q_ONE = 0;
+const int Q_OPTIONAL = 1;
+const int Q_STAR = 2;
+const int Q_PLUS = 3;
+
+/// A capture found by `run`.
+pub type Found {
+    pub str name;
+    pub int start;
+    pub int stop;
+    pub int pattern;
+    /// rows, columns, rows, columns to add to the start and the end (from `#offset!`), or empty
+    pub List<int> offset = [];
+}
+
+/** Captures order by start, then longer first, then pattern number. */
+pub int Found.cmp(Found other) {
+    if (start != other.start) {
+        return start - other.start;
+    }
+    if (stop != other.stop) {
+        return other.stop - stop;
+    }
+    return pattern - other.pattern;
+}
+
+pub type Query {
+    pub List<str> capture_names = [];
+    pub bool is_failed = false;
+    pub str error_text = "";
+    pub int pattern_count = 0;
+    pub List<Map<str, str>> properties = [];
+    List<str> token_text = [];
+    List<int> token_kind = [];
+    List<int> token_at = [];
+    int cursor = 0;
+    List<int> node_kind = [];
+    List<str> node_name = [];
+    List<List<int>> node_items = [];
+    List<List<int>> node_captures = [];
+    List<List<str>> node_negated = [];
+    List<int> node_anchored_end = [];
+    List<int> item_node = [];
+    List<str> item_field = [];
+    List<int> item_quantifier = [];
+    List<int> item_anchored = [];
+    List<int> pattern_root = [];
+    List<List<int>> pattern_predicates = [];
+    List<List<int>> pattern_offsets = [];
+    List<str> predicate_name = [];
+    List<List<str>> predicate_arguments = [];
+    List<List<int>> predicate_kinds = [];
+    Map<str, List<int>> by_type = {};
+    List<int> unindexed = [];
+    List<int> sequences = [];
+    Map<str, GRV_find.Finder> finders = {};
+}
+
+void Query.fail(int position, str message) {
+    if (!is_failed) {
+        is_failed = true;
+        error_text = "query: " + message + " at byte " + str(position);
+    }
+}
+
+void Query.add_token(int kind, str text, int position) {
+    token_kind.push(kind);
+    token_text.push(text);
+    token_at.push(position);
+}
+
+void Query.tokenize(str source) {
+    int size = source.size();
+    int index = 0;
+    while (index < size && !is_failed) {
+        int code = source.byte_at(index);
+        if (code == 32 || code == 9 || code == 10 || code == 13) {
+            index = index + 1;
+        } else if (code == 59) {
+            while (index < size && source.byte_at(index) != 10) {
+                index = index + 1;
+            }
+        } else if (code == 40) {
+            add_token(T_OPEN, "(", index);
+            index = index + 1;
+        } else if (code == 41) {
+            add_token(T_CLOSE, ")", index);
+            index = index + 1;
+        } else if (code == 91) {
+            add_token(T_BRACKET_OPEN, "[", index);
+            index = index + 1;
+        } else if (code == 93) {
+            add_token(T_BRACKET_CLOSE, "]", index);
+            index = index + 1;
+        } else if (code == 34) {
+            int position = index;
+            index = index + 1;
+            str text = "";
+            int from = index;
+            while (index < size && source.byte_at(index) != 34) {
+                if (source.byte_at(index) == 92 && index + 1 < size) {
+                    text = text + source.substr(from, index);
+                    int escaped = source.byte_at(index + 1);
+                    if (escaped == 110) {
+                        text = text + "\n";
+                    } else if (escaped == 116) {
+                        text = text + "\t";
+                    } else if (escaped == 114) {
+                        text = text + "\r";
+                    } else {
+                        text = text + source.substr(index + 1, index + 2);
+                    }
+                    index = index + 2;
+                    from = index;
+                } else {
+                    index = index + 1;
+                }
+            }
+            if (index >= size) {
+                fail(position, "unterminated string");
+                return;
+            }
+            text = text + source.substr(from, index);
+            index = index + 1;
+            add_token(T_STRING, text, position);
+        } else if (code == 64) {
+            int from = index + 1;
+            index = from;
+            while (index < size && is_capture_char(source.byte_at(index))) {
+                index = index + 1;
+            }
+            if (index == from) {
+                fail(from - 1, "a capture needs a name");
+                return;
+            }
+            add_token(T_CAPTURE, source.substr(from, index), from - 1);
+        } else if (code == 35) {
+            int from = index;
+            index = index + 1;
+            while (index < size && (is_name_char(source.byte_at(index)) || source.byte_at(index) == 63 || source.byte_at(index) == 33 || source.byte_at(index) == 46)) {
+                index = index + 1;
+            }
+            add_token(T_PREDICATE, source.substr(from + 1, index), from);
+        } else if (code == 46) {
+            add_token(T_DOT, ".", index);
+            index = index + 1;
+        } else if (code == 42) {
+            add_token(T_STAR, "*", index);
+            index = index + 1;
+        } else if (code == 43) {
+            add_token(T_PLUS, "+", index);
+            index = index + 1;
+        } else if (code == 63) {
+            add_token(T_QUESTION, "?", index);
+            index = index + 1;
+        } else if (code == 33) {
+            add_token(T_BANG, "!", index);
+            index = index + 1;
+        } else if (is_name_char(code)) {
+            int from = index;
+            while (index < size && is_name_char(source.byte_at(index))) {
+                index = index + 1;
+            }
+            if (index < size && source.byte_at(index) == 58) {
+                add_token(T_FIELD, source.substr(from, index), from);
+                index = index + 1;
+            } else {
+                add_token(T_NAME, source.substr(from, index), from);
+            }
+        } else {
+            fail(index, "unexpected character");
+            return;
+        }
+    }
+}
+
+int Query.peek() {
+    if (cursor < token_kind.size()) {
+        return token_kind[cursor];
+    }
+    return -1;
+}
+
+int Query.peek_at(int ahead) {
+    if (cursor + ahead < token_kind.size()) {
+        return token_kind[cursor + ahead];
+    }
+    return -1;
+}
+
+int Query.capture_id(str name) {
+    int found = capture_names.index_of(name).or(-1);
+    if (found >= 0) {
+        return found;
+    }
+    capture_names.push(name);
+    return capture_names.size() - 1;
+}
+
+int Query.new_node(int kind, str name) {
+    node_kind.push(kind);
+    node_name.push(name);
+    node_items.push([]);
+    node_captures.push([]);
+    node_negated.push([]);
+    node_anchored_end.push(0);
+    return node_kind.size() - 1;
+}
+
+int Query.new_item(int node, str field, int quantifier, int anchored) {
+    item_node.push(node);
+    item_field.push(field);
+    item_quantifier.push(quantifier);
+    item_anchored.push(anchored);
+    return item_node.size() - 1;
+}
+
+// quantifiers and captures after a pattern; returns the quantifier
+int Query.parse_suffix(int node) {
+    int quantifier = Q_ONE;
+    while (!is_failed) {
+        int kind = peek();
+        if (kind == T_QUESTION) {
+            quantifier = Q_OPTIONAL;
+        } else if (kind == T_STAR) {
+            quantifier = Q_STAR;
+        } else if (kind == T_PLUS) {
+            quantifier = Q_PLUS;
+        } else if (kind == T_CAPTURE) {
+            node_captures[node].push(capture_id(token_text[cursor]));
+        } else {
+            break;
+        }
+        cursor = cursor + 1;
+    }
+    return quantifier;
+}
+
+// the children of a node pattern, up to the closing parenthesis (not consumed)
+void Query.parse_children(int node, int pattern) {
+    int anchored = 0;
+    while (!is_failed && peek() != T_CLOSE) {
+        int kind = peek();
+        if (kind < 0) {
+            fail(0, "missing )");
+            return;
+        }
+        if (kind == T_DOT) {
+            cursor = cursor + 1;
+            if (peek() == T_CLOSE) {
+                node_anchored_end[node] = 1;
+            } else {
+                anchored = 1;
+            }
+        } else if (kind == T_BANG) {
+            cursor = cursor + 1;
+            if (peek() != T_NAME) {
+                fail(token_at[cursor - 1], "a field name must follow !");
+                return;
+            }
+            node_negated[node].push(token_text[cursor]);
+            cursor = cursor + 1;
+        } else if (kind == T_OPEN && peek_at(1) == T_PREDICATE) {
+            parse_predicate(pattern);
+        } else {
+            str field = "";
+            if (kind == T_FIELD) {
+                field = token_text[cursor];
+                cursor = cursor + 1;
+            }
+            int child = parse_pattern(pattern);
+            if (is_failed) {
+                return;
+            }
+            int quantifier = parse_suffix(child);
+            if (node_kind[child] == K_GROUP && node_items[child].size() > 1 && quantifier == Q_ONE && field == "" && node_captures[child].size() == 0) {
+                /* a plain group of siblings is those siblings, in order */
+                for (int index in 0 .. node_items[child].size()) {
+                    int member = node_items[child][index];
+                    if (index == 0 && anchored == 1) {
+                        item_anchored[member] = 1;
+                    }
+                    node_items[node].push(member);
+                }
+            } else {
+                node_items[node].push(new_item(child, field, quantifier, anchored));
+            }
+            anchored = 0;
+        }
+    }
+}
+
+void Query.parse_predicate(int pattern) {
+    cursor = cursor + 1;
+    str name = token_text[cursor];
+    cursor = cursor + 1;
+    List<str> arguments = [];
+    List<int> kinds = [];
+    while (peek() != T_CLOSE && peek() >= 0) {
+        int kind = peek();
+        arguments.push(token_text[cursor]);
+        if (kind == T_CAPTURE) {
+            kinds.push(0);
+        } else if (kind == T_STRING) {
+            kinds.push(1);
+        } else {
+            kinds.push(2);
+        }
+        cursor = cursor + 1;
+    }
+    if (peek() != T_CLOSE) {
+        fail(0, "missing ) after a predicate");
+        return;
+    }
+    cursor = cursor + 1;
+    if (name == "set!") {
+        if (arguments.size() >= 1) {
+            str value = "";
+            if (arguments.size() >= 2) {
+                value = arguments[1];
+            }
+            properties[pattern].set(arguments[0], value);
+        }
+    } else if (name == "offset!") {
+        if (arguments.size() == 5 && kinds[0] == 0) {
+            pattern_offsets[pattern] = [capture_id(arguments[0]), arguments[1].parse_int().or(0), arguments[2].parse_int().or(0), arguments[3].parse_int().or(0), arguments[4].parse_int().or(0)];
+        }
+    } else {
+        predicate_name.push(name);
+        predicate_arguments.push(arguments);
+        predicate_kinds.push(kinds);
+        pattern_predicates[pattern].push(predicate_name.size() - 1);
+    }
+}
+
+int Query.parse_pattern(int pattern) {
+    int kind = peek();
+    int node = -1;
+    if (kind == T_OPEN) {
+        cursor = cursor + 1;
+        int next = peek();
+        if (next == T_OPEN || next == T_BRACKET_OPEN || next == T_STRING) {
+            node = new_node(K_GROUP, "");
+            while (!is_failed && peek() != T_CLOSE) {
+                if (peek() < 0) {
+                    fail(0, "missing )");
+                    return node;
+                }
+                if (peek() == T_OPEN && peek_at(1) == T_PREDICATE) {
+                    parse_predicate(pattern);
+                } else {
+                    int child = parse_pattern(pattern);
+                    if (is_failed) {
+                        return node;
+                    }
+                    int quantifier = parse_suffix(child);
+                    node_items[node].push(new_item(child, "", quantifier, 0));
+                }
+            }
+            cursor = cursor + 1;
+        } else if (next == T_NAME) {
+            str name = token_text[cursor];
+            cursor = cursor + 1;
+            if (name == "_") {
+                node = new_node(K_WILD_NAMED, "");
+            } else if (name == "ERROR") {
+                node = new_node(K_ERROR, name);
+            } else {
+                node = new_node(K_NAMED, name);
+            }
+            parse_children(node, pattern);
+            if (peek() != T_CLOSE) {
+                fail(0, "missing )");
+                return node;
+            }
+            cursor = cursor + 1;
+        } else {
+            fail(token_at[cursor - 1], "a pattern was expected after (");
+            return 0;
+        }
+    } else if (kind == T_BRACKET_OPEN) {
+        cursor = cursor + 1;
+        node = new_node(K_ALT, "");
+        while (!is_failed && peek() != T_BRACKET_CLOSE) {
+            if (peek() < 0) {
+                fail(0, "missing ]");
+                return node;
+            }
+            int child = parse_pattern(pattern);
+            if (is_failed) {
+                return node;
+            }
+            int quantifier = parse_suffix(child);
+            node_items[node].push(new_item(child, "", quantifier, 0));
+        }
+        cursor = cursor + 1;
+    } else if (kind == T_STRING) {
+        node = new_node(K_ANON, token_text[cursor]);
+        cursor = cursor + 1;
+    } else if (kind == T_NAME && token_text[cursor] == "_") {
+        node = new_node(K_WILD_ANY, "");
+        cursor = cursor + 1;
+    } else {
+        fail(token_at[cursor], "a pattern was expected");
+        return 0;
+    }
+    return node;
+}
+
+void Query.index_pattern(int pattern) {
+    int root = pattern_root[pattern];
+    int kind = node_kind[root];
+    if (kind == K_NAMED || kind == K_ANON) {
+        List<int> list = by_type.get(node_name[root]).or([]);
+        list.push(pattern);
+        by_type.set(node_name[root], list);
+    } else if (kind == K_GROUP && node_items[root].size() > 1) {
+        sequences.push(pattern);
+    } else {
+        unindexed.push(pattern);
+    }
+}
+
+// ---------------------------------------------------------------- tokens
+
+bool is_name_char(int code) {
+    return (code >= 97 && code <= 122) || (code >= 65 && code <= 90) || (code >= 48 && code <= 57) || code == 95 || code == 45 || code == 47;
+}
+
+bool is_capture_char(int code) {
+    return is_name_char(code) || code == 46;
+}
+
+// ---------------------------------------------------------------- parser
+
+/// Parse a query. Check `is_failed` and `error_text`.
+pub Query parse(str source) {
+    Query query = Query();
+    query.tokenize(source);
+    while (!query.is_failed && query.cursor < query.token_kind.size()) {
+        int pattern = query.pattern_root.size();
+        query.pattern_root.push(-1);
+        query.pattern_predicates.push([]);
+        query.pattern_offsets.push([]);
+        Map<str, str> own = {};
+        query.properties.push(own);
+        int root = query.parse_pattern(pattern);
+        if (query.is_failed) {
+            break;
+        }
+        query.parse_suffix(root);
+        query.pattern_root[pattern] = root;
+        query.index_pattern(pattern);
+    }
+    query.pattern_count = query.pattern_root.size();
+    return query;
+}
+
+// ---------------------------------------------------------------- matching
+
+/* A node of the visible tree: its id in the tree, byte range, the alias it carries (-1 or
+ * string index * 2 + named) and the field its parent gives it (-1 or a field id). */
+type View {
+    int node;
+    int start;
+    int stop;
+    int alias;
+    int field;
+}
+
+/// A capture inside a match: the capture id, the range and the type names of the ancestors.
+type Cap {
+    int capture;
+    int start;
+    int stop;
+    List<str> ancestors;
+}
+
+type Run {
+    Query query;
+    GRV_tree.Tree tree;
+    GRV_lang.Lang lang;
+    str text;
+    List<Found> found = [];
+}
+
+str Run.type_of(View view) {
+    if (view.alias >= 0) {
+        return lang.grammar.strings[view.alias / 2];
+    }
+    return lang.symbol_name[tree.node_symbol[view.node]];
+}
+
+bool Run.is_named(View view) {
+    if (view.alias >= 0) {
+        return view.alias % 2 == 1;
+    }
+    return lang.is_named(tree.node_symbol[view.node]);
+}
+
+// the visible children of `parent`, hidden nodes replaced by theirs
+void Run.collect(int parent, int parent_start, int inherited, List<View> out) {
+    int production_id = tree.production[parent];
+    int child_number = 0;
+    int cursor = parent_start;
+    if (tree.kid_count[parent] > 0) {
+        cursor = parent_start - tree.padding[tree.kids[tree.kid_at[parent]]];
+    }
+    for (int child_index in 0 .. tree.kid_count[parent]) {
+        int kid = tree.kids[tree.kid_at[parent] + child_index];
+        int kid_start = cursor + tree.padding[kid];
+        cursor = kid_start + tree.size[kid];
+        int field = -1;
+        int alias = -1;
+        if (!tree.has_flag(kid, GRV_tree.FLAG_EXTRA) && production_id >= 0) {
+            field = lang.step_field[lang.prod_start[production_id] + child_number];
+            alias = lang.step_alias[lang.prod_start[production_id] + child_number];
+            child_number = child_number + 1;
+        }
+        int use_field = inherited;
+        if (field >= 0) {
+            use_field = field;
+        }
+        bool is_visible = lang.is_visible(tree.node_symbol[kid]);
+        if (alias >= 0) {
+            is_visible = true;
+        }
+        if (is_visible) {
+            out.push(View(kid, kid_start, kid_start + tree.size[kid], alias, use_field));
+        } else {
+            collect(kid, kid_start, use_field, out);
+        }
+    }
+}
+
+List<View> Run.kids_of(View view) {
+    List<View> out = [];
+    collect(view.node, view.start, -1, out);
+    return out;
+}
+
+List<List<Cap>> Run.match_node(int pattern_node, View view, List<str> ancestors) {
+    List<List<Cap>> none = [];
+    int kind = query.node_kind[pattern_node];
+    str type_name = type_of(view);
+    if (kind == K_NAMED) {
+        if (!is_named(view) || type_name != query.node_name[pattern_node]) {
+            return none;
+        }
+    } else if (kind == K_ANON) {
+        if (is_named(view) || type_name != query.node_name[pattern_node]) {
+            return none;
+        }
+    } else if (kind == K_WILD_NAMED) {
+        if (!is_named(view)) {
+            return none;
+        }
+    } else if (kind == K_ERROR) {
+        if (view.alias >= 0 || tree.node_symbol[view.node] != lang.error_symbol) {
+            return none;
+        }
+    } else if (kind == K_ALT) {
+        List<List<Cap>> out = [];
+        for (int item in query.node_items[pattern_node]) {
+            for (List<Cap> binding in match_node(query.item_node[item], view, ancestors)) {
+                out.push(binding);
+            }
+        }
+        return with_captures(pattern_node, view, ancestors, out);
+    } else if (kind == K_GROUP) {
+        List<int> items = query.node_items[pattern_node];
+        if (items.size() == 0) {
+            return none;
+        }
+        return with_captures(pattern_node, view, ancestors, match_node(query.item_node[items[0]], view, ancestors));
+    }
+    List<List<Cap>> bindings = [];
+    if (query.node_items[pattern_node].size() == 0 && query.node_negated[pattern_node].size() == 0 && query.node_anchored_end[pattern_node] == 0) {
+        List<Cap> empty = [];
+        bindings.push(empty);
+    } else {
+        List<View> kids = kids_of(view);
+        for (str negated in query.node_negated[pattern_node]) {
+            for (View kid in kids) {
+                if (kid.field >= 0 && lang.field_names[kid.field] == negated) {
+                    return none;
+                }
+            }
+        }
+        List<str> inner = ancestors.slice(0, ancestors.size());
+        inner.push(type_name);
+        List<Cap> start_binding = [];
+        bindings = sequence(pattern_node, 0, kids, 0, start_binding, inner, -1, false);
+    }
+    return with_captures(pattern_node, view, ancestors, bindings);
+}
+
+// add the captures of pattern node `pattern_node` for `view` to each binding
+List<List<Cap>> Run.with_captures(int pattern_node, View view, List<str> ancestors, List<List<Cap>> bindings) {
+    List<int> captures = query.node_captures[pattern_node];
+    if (captures.size() == 0) {
+        return bindings;
+    }
+    List<List<Cap>> out = [];
+    for (List<Cap> binding in bindings) {
+        List<Cap> grown = clone_caps(binding);
+        for (int capture in captures) {
+            grown.push(Cap(capture, view.start, view.stop, ancestors));
+        }
+        out.push(grown);
+    }
+    return out;
+}
+
+// the children `kids` matched by the items of `pattern_node` from item `item_number`, children from index `from`
+List<List<Cap>> Run.sequence(int pattern_node, int item_number, List<View> kids, int from, List<Cap> current, List<str> ancestors, int previous, bool is_repeating) {
+    List<int> items = query.node_items[pattern_node];
+    List<List<Cap>> out = [];
+    if (item_number == items.size()) {
+        if (query.node_anchored_end[pattern_node] == 1) {
+            for (int index in previous + 1 .. kids.size()) {
+                if (is_named(kids[index])) {
+                    return out;
+                }
+            }
+        }
+        out.push(current);
+        return out;
+    }
+    int item = items[item_number];
+    int quantifier = query.item_quantifier[item];
+    bool is_anchored = query.item_anchored[item] == 1;
+    str field = query.item_field[item];
+    if (is_repeating || quantifier == Q_OPTIONAL || quantifier == Q_STAR) {
+        for (List<Cap> rest in sequence(pattern_node, item_number + 1, kids, from, current, ancestors, previous, false)) {
+            out.push(rest);
+        }
+    }
+    for (int index in from .. kids.size()) {
+        if (is_anchored && index > from && is_named(kids[index - 1])) {
+            break;
+        }
+        View kid = kids[index];
+        if (field != "" && (kid.field < 0 || lang.field_names[kid.field] != field)) {
+            continue;
+        }
+        for (List<Cap> sub in match_node(query.item_node[item], kid, ancestors)) {
+            List<Cap> joined = clone_caps(current);
+            for (Cap cap in sub) {
+                joined.push(cap);
+            }
+            if (quantifier == Q_STAR || quantifier == Q_PLUS) {
+                for (List<Cap> more in sequence(pattern_node, item_number, kids, index + 1, joined, ancestors, index, true)) {
+                    out.push(more);
+                }
+            }
+            for (List<Cap> rest in sequence(pattern_node, item_number + 1, kids, index + 1, joined, ancestors, index, false)) {
+                out.push(rest);
+            }
+        }
+    }
+    return out;
+}
+
+List<str> Run.texts_of(List<Cap> binding, int capture) {
+    List<str> out = [];
+    for (Cap cap in binding) {
+        if (cap.capture == capture) {
+            out.push(text.substr(cap.start, cap.stop));
+        }
+    }
+    return out;
+}
+
+GRV_find.Finder Run.finder_for(str pattern, bool is_lua) {
+    str key = pattern;
+    if (is_lua) {
+        key = "lua:" + pattern;
+    } else {
+        key = "re:" + pattern;
+    }
+    match (query.finders.get(key)) {
+        case Some(GRV_find.Finder known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    GRV_find.Finder made = GRV_find.compile(pattern);
+    if (is_lua) {
+        made = GRV_find.compile_lua(pattern);
+    }
+    query.finders.set(key, made);
+    return made;
+}
+
+bool Run.is_predicate_true(int predicate, List<Cap> binding) {
+    str name = query.predicate_name[predicate];
+    List<str> arguments = query.predicate_arguments[predicate];
+    List<int> kinds = query.predicate_kinds[predicate];
+    if (arguments.size() == 0 || kinds[0] != 0) {
+        return true;
+    }
+    int capture = query.capture_names.index_of(arguments[0]).or(-1);
+    List<str> texts = texts_of(binding, capture);
+    if (texts.size() == 0) {
+        return true;
+    }
+    bool is_negated = name.starts_with("not-");
+    str base = name;
+    if (is_negated) {
+        base = name.substr(4, name.size());
+    }
+    bool is_any = false;
+    if (base.starts_with("any-") && base != "any-of?") {
+        is_any = true;
+        base = base.substr(4, base.size());
+    }
+    bool is_true = true;
+    if (base == "eq?" && arguments.size() >= 2) {
+        List<str> others = [arguments[1]];
+        if (kinds[1] == 0) {
+            others = texts_of(binding, query.capture_names.index_of(arguments[1]).or(-1));
+        }
+        if (others.size() == 0) {
+            return true;
+        }
+        is_true = true;
+        if (is_any) {
+            is_true = false;
+        }
+        for (str one in texts) {
+            bool is_same = one == others[0];
+            if (is_any && is_same) {
+                is_true = true;
+            }
+            if (!is_any && !is_same) {
+                is_true = false;
+            }
+        }
+    } else if ((base == "match?" || base == "lua-match?") && arguments.size() >= 2) {
+        GRV_find.Finder finder = finder_for(arguments[1], base == "lua-match?");
+        is_true = true;
+        if (is_any) {
+            is_true = false;
+        }
+        for (str one in texts) {
+            bool is_hit = finder.is_found(one);
+            if (is_any && is_hit) {
+                is_true = true;
+            }
+            if (!is_any && !is_hit) {
+                is_true = false;
+            }
+        }
+    } else if (base == "any-of?" && arguments.size() >= 2) {
+        is_true = true;
+        for (str one in texts) {
+            bool is_listed = false;
+            for (int index in 1 .. arguments.size()) {
+                if (arguments[index] == one) {
+                    is_listed = true;
+                }
+            }
+            if (!is_listed) {
+                is_true = false;
+            }
+        }
+    } else if ((base == "has-ancestor?" || base == "has-parent?") && arguments.size() >= 2) {
+        is_true = false;
+        for (Cap cap in binding) {
+            if (cap.capture != capture) {
+                continue;
+            }
+            int lowest = 0;
+            if (base == "has-parent?") {
+                lowest = cap.ancestors.size() - 1;
+            }
+            for (int level in lowest .. cap.ancestors.size()) {
+                if (level < 0) {
+                    continue;
+                }
+                for (int index in 1 .. arguments.size()) {
+                    if (arguments[index] == cap.ancestors[level]) {
+                        is_true = true;
+                    }
+                }
+            }
+        }
+    } else {
+        return true;
+    }
+    if (is_negated) {
+        return !is_true;
+    }
+    return is_true;
+}
+
+void Run.emit(int pattern, List<Cap> binding) {
+    for (int predicate in query.pattern_predicates[pattern]) {
+        if (!is_predicate_true(predicate, binding)) {
+            return;
+        }
+    }
+    List<int> offsets = query.pattern_offsets[pattern];
+    for (Cap cap in binding) {
+        Found one = Found(query.capture_names[cap.capture], cap.start, cap.stop, pattern);
+        if (offsets.size() == 5 && offsets[0] == cap.capture) {
+            one.offset = [offsets[1], offsets[2], offsets[3], offsets[4]];
+        }
+        found.push(one);
+    }
+}
+
+void Run.try_patterns(List<int> patterns, View view, List<str> ancestors) {
+    for (int pattern in patterns) {
+        for (List<Cap> binding in match_node(query.pattern_root[pattern], view, ancestors)) {
+            emit(pattern, binding);
+        }
+    }
+}
+
+void Run.visit(View view, List<str> ancestors, int from, int last) {
+    List<int> typed = query.by_type.get(type_of(view)).or([]);
+    if (typed.size() > 0) {
+        try_patterns(typed, view, ancestors);
+    }
+    try_patterns(query.unindexed, view, ancestors);
+    List<View> kids = kids_of(view);
+    if (query.sequences.size() > 0 && kids.size() > 0) {
+        run_sequences(kids, ancestors, type_of(view));
+    }
+    List<str> inner = ancestors.slice(0, ancestors.size());
+    inner.push(type_of(view));
+    for (View kid in kids) {
+        if (kid.stop >= from && kid.start <= last) {
+            visit(kid, inner, from, last);
+        }
+    }
+}
+
+// patterns that are sequences of siblings, tried against the children of a node
+void Run.run_sequences(List<View> kids, List<str> ancestors, str parent_type) {
+    List<str> inner = ancestors.slice(0, ancestors.size());
+    inner.push(parent_type);
+    for (int pattern in query.sequences) {
+        List<Cap> empty = [];
+        for (List<Cap> binding in sequence(query.pattern_root[pattern], 0, kids, 0, empty, inner, -1, false)) {
+            emit(pattern, binding);
+        }
+    }
+}
+
+List<Cap> clone_caps(List<Cap> caps) {
+    return caps.slice(0, caps.size());
+}
+
+// ---------------------------------------------------------------- predicates
+
+// ---------------------------------------------------------------- driving
+
+/** The captures of every match whose nodes meet the byte range [from, last], without duplicates, sorted by
+ * start, then longer first, then pattern number. */
+pub List<Found> run(Query query, GRV_tree.Tree tree, str text, int from, int last) {
+    Run runner = Run(query, tree, tree.lang, text);
+    int root_start = tree.padding[tree.root];
+    View root = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1);
+    List<str> ancestors = [];
+    runner.visit(root, ancestors, from, last);
+    if (query.sequences.size() > 0) {
+        List<View> top = [root];
+        runner.run_sequences(top, ancestors, "");
+    }
+    runner.found.sort();
+    List<Found> out = [];
+    Map<str, bool> seen = {};
+    for (Found one in runner.found) {
+        str identity = one.name + "#" + str(one.start) + "#" + str(one.stop) + "#" + str(one.pattern);
+        if (!seen.contains(identity)) {
+            seen.set(identity, true);
+            out.push(one);
+        }
+    }
+    return out;
+}
