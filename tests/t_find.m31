@@ -1,0 +1,34 @@
+/* Pattern search for query predicates: the regex dialect and Lua patterns. */
+
+import core.GRV_find;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+bool is_regex_match(str pattern, str text) {
+    return GRV_find.compile(pattern).is_found(text);
+}
+
+bool is_lua_match(str pattern, str text) {
+    return GRV_find.compile_lua(pattern).is_found(text);
+}
+
+check.ok("a literal is found inside", is_regex_match("bc", "abcd"));
+check.ok("not found", !is_regex_match("bd", "abcd"));
+check.ok("anchored at the start", is_regex_match("^ab", "abcd") && !is_regex_match("^bc", "abcd"));
+check.ok("\\A anchors too", is_regex_match("\\Aab", "abcd") && !is_regex_match("\\Abc", "abcd"));
+check.ok("anchored at the end", is_regex_match("cd$", "abcd") && !is_regex_match("bc$", "abcd"));
+check.ok("a class and a quantifier", is_regex_match("^[A-Z][A-Z\\d_]*$", "MAX_SIZE2") && !is_regex_match("^[A-Z][A-Z\\d_]*$", "Max"));
+check.ok("alternation", is_regex_match("^(yield|await)$", "await") && !is_regex_match("^(yield|await)$", "awaiting"));
+check.ok("the empty text", is_regex_match("^$", "") && !is_regex_match("^$", "x"));
+check.ok("a counted repeat", is_regex_match("^a{2,3}$", "aaa") && !is_regex_match("^a{2,3}$", "aaaa"));
+check.eq_str("a Lua class", GRV_find.lua_to_regex("%a+"), "[A-Za-z]+");
+check.ok("^%u in Lua", is_lua_match("^%u", "Abc") && !is_lua_match("^%u", "abc"));
+check.ok("Lua's ^[%u_][%u%d_]+$", is_lua_match("^[%u_][%u%d_]+$", "MAX_1") && !is_lua_match("^[%u_][%u%d_]+$", "Max_1"));
+check.ok("Lua's - is a star", is_lua_match("^a-b$", "aaab") && is_lua_match("^a-b$", "b"));
+check.ok("Lua escapes with %", is_lua_match("^%.", ".x") && !is_lua_match("^%.", "x"));
+check.ok("Lua's . matches anything", is_lua_match("^a.c$", "a\nc"));
+check.ok("Lua's ^--- is lazily many - then one -", is_lua_match("^---", "-- c") && is_lua_match("^---", "-") && !is_lua_match("^---", "x"));
+check.ok("Lua's ^[-=]*$", is_lua_match("^[-=]+$", "-=-") && !is_lua_match("^[-=]+$", "-a"));
+check.ok("%b is not translated and never matches", !is_lua_match("%b()", "(a)"));
+check.finish();

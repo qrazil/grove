@@ -1,0 +1,259 @@
+/* Searching text with a pattern: the regex dialect of GRV_regex, and Lua's patterns translated into it.
+ *
+ * Queries ask `#match?` (a regex) and `#lua-match?` (a Lua pattern, as nvim-treesitter's queries write
+ * them) of the text of a node. `compile` turns a pattern into an NFA; `is_found` runs it from every
+ * start (or only from the start of the text if the pattern begins with `^` or `\A`) and says whether
+ * some match exists, ending at the end of the text if the pattern ends with `$`. That is all a
+ * predicate needs: it never asks where the match is.
+ *
+ * Lua patterns: `%a %d %l %s %u %w %x %p %c` and their capitals, `%` before a punctuation mark, sets,
+ * `.`, the quantifiers `* + - ?`, `^` and `$`, groups. `%b` and `%f` are not translated (the pattern
+ * then never matches). Whether a quantifier is lazy or greedy does not change whether a match
+ * exists, so `-` is `*`. */
+
+import core.GRV_regex;
+
+pub type Finder {
+    pub bool is_valid = true;
+    GRV_regex.Nfa nfa = GRV_regex.Nfa();
+    int start = 0;
+    bool is_anchored_start = false;
+    bool is_anchored_end = false;
+    List<int> mark = [];
+    int epoch = 0;
+}
+
+List<int> Finder.closure(List<int> seeds) {
+    epoch = epoch + 1;
+    List<int> stack = [];
+    List<int> out = [];
+    for (int seed in seeds) {
+        stack.push(seed);
+    }
+    while (stack.size() > 0) {
+        int current = stack.pop();
+        if (current < 0 || mark[current] == epoch) {
+            continue;
+        }
+        mark[current] = epoch;
+        int state_kind = nfa.kind[current];
+        if (state_kind == GRV_regex.N_SPLIT) {
+            stack.push(nfa.out1[current]);
+            stack.push(nfa.out2[current]);
+        } else if (state_kind == GRV_regex.N_EPSILON) {
+            stack.push(nfa.out1[current]);
+        } else {
+            out.push(current);
+        }
+    }
+    return out;
+}
+
+// does a match begin at index `begin` of `points`
+bool Finder.can_match_at(List<int> points, int begin) {
+    List<int> current = closure([start]);
+    int cursor = begin;
+    while (true) {
+        for (int member in current) {
+            if (nfa.kind[member] == GRV_regex.N_ACCEPT && (!is_anchored_end || cursor == points.size())) {
+                return true;
+            }
+        }
+        if (cursor >= points.size() || current.size() == 0) {
+            return false;
+        }
+        List<int> targets = [];
+        for (int member in current) {
+            if (nfa.kind[member] == GRV_regex.N_CLASS && nfa.classes.is_member(nfa.arg[member], points[cursor])) {
+                targets.push(nfa.out1[member]);
+            }
+        }
+        current = closure(targets);
+        cursor = cursor + 1;
+    }
+}
+
+/// Is there a match of the pattern in `text`.
+pub bool Finder.is_found(str text) {
+    if (!is_valid) {
+        return false;
+    }
+    List<int> points = text.chars();
+    if (is_anchored_start) {
+        return can_match_at(points, 0);
+    }
+    for (int begin in 0 .. points.size() + 1) {
+        if (can_match_at(points, begin)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Compile a regex of the dialect of GRV_regex (`^`, `\A` at the start and `$` at the end anchor it).
+pub Finder compile(str pattern) {
+    Finder finder = Finder();
+    str body = pattern;
+    if (body.starts_with("^")) {
+        finder.is_anchored_start = true;
+        body = body.substr(1, body.size());
+    } else if (body.starts_with("\\A")) {
+        finder.is_anchored_start = true;
+        body = body.substr(2, body.size());
+    }
+    if (body.ends_with("$") && !body.ends_with("\\$")) {
+        finder.is_anchored_end = true;
+        body = body.substr(0, body.size() - 1);
+    }
+    int accept = finder.nfa.state(GRV_regex.N_ACCEPT, 0, -1, -1);
+    finder.start = finder.nfa.compile_pattern(body, accept);
+    for (int index in 0 .. finder.nfa.kind.size()) {
+        finder.mark.push(0);
+    }
+    return finder;
+}
+
+// ---------------------------------------------------------------- Lua patterns
+
+// the body of a regex set for a Lua class letter (lower case), or "" if it is not one
+str class_body(int letter) {
+    if (letter == 97) {
+        return "A-Za-z";
+    }
+    if (letter == 100) {
+        return "0-9";
+    }
+    if (letter == 108) {
+        return "a-z";
+    }
+    if (letter == 115) {
+        return " \\t\\n\\r\\f\\v";
+    }
+    if (letter == 117) {
+        return "A-Z";
+    }
+    if (letter == 119) {
+        return "A-Za-z0-9";
+    }
+    if (letter == 120) {
+        return "0-9A-Fa-f";
+    }
+    if (letter == 112) {
+        return "!-/:-@\\[-`{-~";
+    }
+    if (letter == 99) {
+        return "\\x00-\\x1f\\x7f";
+    }
+    return "";
+}
+
+bool is_plain_letter(int code_point) {
+    return (code_point >= 97 && code_point <= 122) || (code_point >= 65 && code_point <= 90);
+}
+
+str escape_literal(int code_point) {
+    str one = str.from_chars([code_point]);
+    if ("\\()|*+?{}.^$[]".contains(one)) {
+        return "\\" + one;
+    }
+    return one;
+}
+
+/** The regex of the dialect of GRV_regex that matches what the Lua pattern `pattern` matches; "" if the
+ * pattern uses something that is not translated. */
+pub str lua_to_regex(str pattern) {
+    List<int> points = pattern.chars();
+    str out = "";
+    int cursor = 0;
+    bool can_quantify = false;
+    while (cursor < points.size()) {
+        int current = points[cursor];
+        cursor = cursor + 1;
+        if (current == 37) {
+            if (cursor >= points.size()) {
+                return "";
+            }
+            int letter = points[cursor];
+            cursor = cursor + 1;
+            if (letter == 98 || letter == 102) {
+                return "";
+            }
+            str body = class_body(letter | 32);
+            if (is_plain_letter(letter) && body != "") {
+                if (letter < 91) {
+                    out = out + "[^" + body + "]";
+                } else {
+                    out = out + "[" + body + "]";
+                }
+            } else {
+                out = out + escape_literal(letter);
+            }
+            can_quantify = true;
+        } else if (current == 91) {
+            str set = "[";
+            if (cursor < points.size() && points[cursor] == 94) {
+                set = "[^";
+                cursor = cursor + 1;
+            }
+            bool is_first = true;
+            while (cursor < points.size() && (points[cursor] != 93 || is_first)) {
+                int member = points[cursor];
+                cursor = cursor + 1;
+                is_first = false;
+                if (member == 37 && cursor < points.size()) {
+                    int letter = points[cursor];
+                    cursor = cursor + 1;
+                    str body = class_body(letter | 32);
+                    if (is_plain_letter(letter) && body != "" && letter > 90) {
+                        set = set + body;
+                    } else if (is_plain_letter(letter) && body != "") {
+                        return "";
+                    } else {
+                        set = set + "\\" + str.from_chars([letter]);
+                    }
+                } else if (member == 92 || member == 91) {
+                    set = set + "\\" + str.from_chars([member]);
+                } else {
+                    set = set + str.from_chars([member]);
+                }
+            }
+            cursor = cursor + 1;
+            out = out + set + "]";
+            can_quantify = true;
+        } else if (current == 46) {
+            out = out + "(?:.|\\n)";
+            can_quantify = true;
+        } else if (current == 94 && cursor == 1) {
+            out = out + "^";
+        } else if (current == 36 && cursor == points.size()) {
+            out = out + "$";
+        } else if (can_quantify && (current == 42 || current == 43 || current == 63)) {
+            out = out + str.from_chars([current]);
+            can_quantify = false;
+        } else if (can_quantify && current == 45) {
+            out = out + "*";
+            can_quantify = false;
+        } else if (current == 40) {
+            out = out + "(";
+            can_quantify = false;
+        } else if (current == 41) {
+            out = out + ")";
+            can_quantify = true;
+        } else {
+            out = out + escape_literal(current);
+            can_quantify = true;
+        }
+    }
+    return out;
+}
+
+/// Compile a Lua pattern (an invalid or untranslatable one never matches).
+pub Finder compile_lua(str pattern) {
+    str translated = lua_to_regex(pattern);
+    if (translated == "" && pattern != "") {
+        Finder never = compile("a");
+        never.is_valid = false;
+        return never;
+    }
+    return compile(translated);
+}
