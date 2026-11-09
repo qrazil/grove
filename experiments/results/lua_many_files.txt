@@ -1,0 +1,5 @@
+grove vs tree-sitter (nvim, lua.so of the same revision), up to 400 Lua files (<= 60 KB) under ~/.local/share/nvim, ~/.config/nvim, /usr/share/nvim, chosen by a hash of the path; the one difference is a file that is not valid UTF-8 (m31 strings are UTF-8)
+DIFF  /home/nox/.local/share/nvim/mason/packages/lua-language-server/libexec/meta/3rd/Defold/library/luasocket.lua line 1
+     ours: !!!! /home/nox/.local/share/nvim/mason/packages/lua-language-server/libexec/meta/3rd/Defold/library/luasocket.lua: unreadable
+     want: (chunk	0-39316
+399 identical, 1 different, 0 skipped (tree-sitter reports errors)

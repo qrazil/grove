@@ -111,4 +111,30 @@ match (lexer_of("tests/data/c/grammar.json")) {
         check.ok("and the declaration after it survives", broken.sexp().contains("declarator: (identifier\t"));
     }
 }
+match (lexer_of("tests/data/lua/grammar.json")) {
+    case None: {
+        check.ok("load the lua grammar", false);
+    }
+    case Some(GRV_lexer.Lexer lexer): {
+        str alphabet = "local x=1\n[]=-\"'(){}, end\nfunction if then ";
+        int state = 4242;
+        int finished = 0;
+        for (int round in 0 .. 150) {
+            List<str> pieces = [];
+            state = (state * 1103515245 + 12345) % 2147483648;
+            int length = (state / 65536) % 60;
+            for (int index in 0 .. length) {
+                state = (state * 1103515245 + 12345) % 2147483648;
+                int pick = (state / 65536) % alphabet.size();
+                pieces.push(alphabet.substr(pick, pick + 1));
+            }
+            GRV_tree.Tree tree = GRV_glr.parse(lexer, pieces.join(""));
+            if (tree.root >= 0) {
+                finished = finished + 1;
+            }
+        }
+        check.eq_int("fuzz (lua): every parse finished with a root", finished, 150);
+        check.ok("an unclosed long string is an error", GRV_glr.parse(lexer, "local s = [==[ never closed\nx = 1\n").has_errors());
+    }
+}
 check.finish();

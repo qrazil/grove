@@ -37,3 +37,10 @@ c	tests/oracle/fixtures/c/micro/u.c
 c	tests/oracle/fixtures/c/micro/v.c
 c	tests/oracle/fixtures/c/micro/resolve.c
 c	tests/oracle/fixtures/c/micro/macro_comment.c
+lua	tests/oracle/fixtures/lua/hello.lua
+lua	tests/oracle/fixtures/lua/strings.lua
+lua	tests/oracle/fixtures/lua/comments.lua
+lua	tests/oracle/fixtures/lua/control.lua
+lua	tests/oracle/fixtures/lua/functions.lua
+lua	tests/oracle/fixtures/lua/tables.lua
+lua	tests/oracle/fixtures/lua/operators.lua

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 (external scanners, Lua)
+
+- `GRV_scan`: the `Scanner` interface and `ScanLexer`; `GRV_scanners.for_language`;
+  `GRV_scan_lua`: tree-sitter-lua's scanner in m31.
+- The lexer calls the scanner first when a state accepts external tokens; scanner state is saved
+  per stack entry and restored before each scan; tree flags `HAS_EXTERNAL` and `ENDS_OPEN` keep
+  incremental reuse sound (a node is reused only when the scanner was and ends at rest).
+- Lua: 7 fixtures and 399 of 400 real files identical to tree-sitter; incremental equals scratch for Lua
+  with hostile edits; reparse after an edit 141 to 169 us on 295 KB.
+- Fixes found on the way: a rule that is only a token and the same token inline are two terminals;
+  a token matching the empty string is a zero-width token when nothing else matches; fragility
+  propagates to a node from its first or last child; nodes reduced for a lookahead that is then
+  rejected, or on a stack above an ERROR, are fragile.
+- Tests: `t_scan` (22), Lua in `t_oracle` (7 fixtures), `t_incr`, `t_recover` (fuzz + unclosed bracket).
+
 ## 0.3.0 (conflict resolution)
 
 - Found why the fork counts differed from "the declared conflicts": tree-sitter's own tables

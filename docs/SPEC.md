@@ -1,6 +1,6 @@
 # grove: specification and feasibility study
 
-Status: **design with a working g1, g2 and conflict resolution (0.3.0)**. Written first as a design
+Status: **design with a working g1, g2, conflict resolution and the first scanner (0.4.0)**. Written first as a design
 (0.0.1); section 14 records what g1 built and measured, and where it changed the
 design. Decisions of the owner (2026-11-09): all recommendations of
 `QUESTIONS.md` approved, with `treesitter_maxfile` defaulting to **5 MB** (plus a
@@ -1383,3 +1383,64 @@ JSON stays at 990 of 990.
   59 519 states; tree-sitter 3 649). The limit above falls back to LALR; the better fix is
   a smaller mask (terminals whose conflicts are resolved by precedence, not those that stay
   forks).
+
+## 17. External scanners and Lua (version 0.4.0)
+
+### 17.1 The interface
+
+`GRV_scan` defines what section 6.3 sketched: `Scanner` (an interface of three methods: `scan`,
+`save`, `restore`) and `ScanLexer` (a concrete type, tree-sitter's `TSLexer`: `lookahead`, `advance`,
+`mark_end`, `is_at_end`; the token ends at the last mark, characters passed with `advance(true)` are
+padding). `scan(lexer, valid)` gets the external tokens valid in the parse state as a `List<bool>` in the
+order of the grammar's `externals`, and returns the index of the token it produced or -1.
+`GRV_scanners.for_language(name)` returns the scanner for a grammar name. The lexer calls it before its
+own automaton whenever the parse state accepts at least one external token (as tree-sitter does); on -1
+it lexes from where it started.
+
+The scanner's state is `save()`d after every external token and kept with the stack entry it belongs to
+(`Stack.scan` indexes a list of byte strings), and `restore()`d before every scan on that stack, so
+forks and the reuse of old subtrees see the state that belonged to their position.
+
+### 17.2 What incremental reuse does with scanner state
+
+A node is reusable only if the scanner was at rest (its initial state) when the node started, which the
+parser checks, and the node does not end with the scanner open. Two tree flags record that:
+`HAS_EXTERNAL` (an external token somewhere inside) and `ENDS_OPEN` (the scanner state after the last
+external token inside is not at rest: a block comment or string that is not closed in the node). Only
+`ENDS_OPEN` prevents reuse: a function containing a closed long string is reused whole; one that opens a
+bracket and closes it in a later sibling is not. Measured on a 295 KB Lua file (functions with long strings
+and block comments): reparse after one inserted space 141 to 169 us, 50 tokens lexed, 13 nodes reused.
+
+### 17.3 The Lua scanner
+
+`GRV_scan_lua` is a hand translation of tree-sitter-lua's 194-line `scanner.c`: long brackets
+`[==[ ... ]==]` close only on the same number of `=`, in strings and in `--[==[` comments; the state is that
+number (and an ending character that is always 0 in this grammar). 22 checks drive it directly
+(`tests/t_scan.m31`): what it accepts, where the token starts and ends, the saved state. The lua
+`comment` rule is a non-terminal extra (a `--` token and a content token, or the three external ones);
+the table builder's extra-rule support (SPEC 14.4 item 3) was written for it and works.
+
+### 17.4 Measured against tree-sitter
+
+- The 7 Lua fixtures (hello, strings, comments, control flow, functions, tables, operators) and, over
+  400 real Lua files from the nvim runtime (<= 60 KB; `experiments/results/lua_many_files.txt`):
+  **399 identical, 1 different**; the one is a file that is not valid UTF-8 and so cannot be an m31 string.
+- 6 other changes were needed to get there, each found by a failing Lua case:
+  1. a rule that is just a token (`empty_statement: ';'`) and the same token written inline (the `;`
+     between the fields of a table) are two terminals; sharing them printed an `empty_statement` node
+     inside tables;
+  2. a token that matches the empty string (`/[^\r\n]*/` after `--`) is a token of no width when nothing
+     else matches (an empty comment `--` before the newline);
+  3. fragility spreads upward as in tree-sitter: a node whose first or last child is fragile or an ERROR is
+     fragile;
+  4. a node reduced for a lookahead that then turns out to have no action in the new state (merged states
+     accept some invalid lookaheads and find out a step later) is fragile, and so is every node reduced on
+     a stack above an ERROR;
+  5. nodes reduced while the stack held an ERROR (also one re-pushed after a reduction) are fragile;
+  6. the incremental test now includes Lua and its hostile edits (`[[`, `]]`, `--`, `--[[`, `]==]`).
+
+### 17.5 What this does not do yet
+
+Scanner state is not part of a node's identity beyond the two flags above; a scanner whose state matters
+inside every node (Python's indent stack) will need the state kept per node, as tree-sitter does; the other
+16 scanners (SPEC 6.2) are untouched.

@@ -16,6 +16,7 @@ lang=$1; grammar=$2; max_files=$3; max_bytes=$4; shift 4
 case "$lang" in
     json) pattern='*.json' ;;
     c) pattern='*.[ch]' ;;
+    lua) pattern='*.lua' ;;
     *) echo "unknown language $lang" >&2; exit 2 ;;
 esac
 work=$(mktemp -d)

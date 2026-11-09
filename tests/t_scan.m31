@@ -1,0 +1,84 @@
+/* The Lua external scanner, driven directly: what it accepts, where a token ends and where it starts,
+ * and that its state is saved and put back. */
+
+import core.GRV_scan;
+import core.GRV_scan_lua;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+List<bool> only(int wanted) {
+    List<bool> flags = [];
+    for (int index in 0 .. 6) {
+        flags.push(index == wanted);
+    }
+    return flags;
+}
+
+List<bool> all_valid() {
+    List<bool> flags = [];
+    for (int index in 0 .. 6) {
+        flags.push(true);
+    }
+    return flags;
+}
+
+// scan `text` from `from`: [token index, token start, token end]
+List<int> run(GRV_scan.Scanner scanner, str text, int from, List<bool> valid) {
+    GRV_scan.ScanLexer lexer = GRV_scan.ScanLexer(text);
+    lexer.position = from;
+    lexer.token_start = from;
+    lexer.farthest = from;
+    int index = scanner.scan(lexer, valid);
+    return [index, lexer.token_start, lexer.token_end()];
+}
+
+GRV_scan.Scanner scanner = GRV_scan_lua.LuaScanner();
+List<int> got = run(scanner, "[==[ a ]==]", 0, only(3));
+check.eq_int("a long bracket opens a string", got[0], 3);
+check.eq_int("and the token is the bracket", got[2], 4);
+got = run(scanner, " \n [[x]]", 0, only(3));
+check.eq_int("padding before the bracket is skipped", got[1], 3);
+check.eq_int("the string start follows it", got[2], 5);
+got = run(scanner, "[=x", 0, only(3));
+check.eq_int("a bracket needs its second [", got[0], -1);
+// the content stops before the closer of the same level
+scanner.restore([]);
+run(scanner, "[==[", 0, only(3));
+got = run(scanner, "a ]] b ]=] c ]==] d", 0, only(4));
+check.eq_int("content found", got[0], 4);
+check.eq_int("it runs past closers of other levels", got[2], 13);
+got = run(scanner, "]==] d", 0, only(5));
+check.eq_int("the closer ends the string", got[0], 5);
+check.eq_int("and is four characters", got[2], 4);
+got = run(scanner, "]=] d", 0, only(5));
+check.eq_int("after the end the level is forgotten, so ]=] no longer closes", got[0], -1);
+// comments
+scanner.restore([]);
+got = run(scanner, "--[[ x ]]", 0, only(0));
+check.eq_int("--[[ opens a block comment", got[0], 0);
+check.eq_int("the token is --[[", got[2], 4);
+got = run(scanner, "-- line", 0, only(0));
+check.eq_int("a line comment is not the scanner's", got[0], -1);
+got = run(scanner, "--[ x", 0, only(0));
+check.eq_int("--[ is a line comment", got[0], -1);
+scanner.restore([]);
+run(scanner, "--[=[", 0, only(0));
+got = run(scanner, " text ]=]", 0, only(1));
+check.eq_int("comment content", got[0], 1);
+check.eq_int("ends before the closer", got[2], 6);
+got = run(scanner, "]=]", 0, only(2));
+check.eq_int("the comment closes", got[0], 2);
+// state
+scanner.restore([]);
+run(scanner, "[==[", 0, only(3));
+bytes saved = scanner.save();
+check.eq_int("the state is the level", saved[1], 2);
+scanner.restore([]);
+check.eq_int("restoring nothing is the initial state", scanner.save()[1], 0);
+scanner.restore(saved);
+got = run(scanner, "]==]", 0, only(5));
+check.eq_int("a restored state closes the string", got[0], 5);
+check.eq_int("nothing valid, nothing found", run(scanner, "[[x]]", 0, only(2))[0], -1);
+check.ok("all valid on plain text finds nothing", run(scanner, "local x", 0, all_valid())[0] == -1);
+check.finish();

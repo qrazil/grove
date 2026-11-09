@@ -1,0 +1,4 @@
+glr parse (cold lexer): 295200 bytes, 250462 tree nodes, 334 ms, 263 dfa states
+glr parse (warm lexer): 333 ms
+edit + reparse, 10 one-space insertions mid-file: apply avg 14 us, reparse avg 141 us, worst 198 us; per edit 26 nodes copied, 13 reused, 50 tokens lexed
+compact: 251146 -> 217800 nodes, 69 ms

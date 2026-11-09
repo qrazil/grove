@@ -143,4 +143,11 @@ void exercise(GRV_check.Check check, str name, str grammar_path, str source, int
 
 exercise(check, "json", "tests/data/json/grammar.json", records(60), 7, ["", " ", "\n", "1", "x", ",", "\"", "[", "]", "{", "}", ":", "true", "\"k\": 1,"], ["", " ", "\n", "1", "22", "0"]);
 exercise(check, "c", "tests/data/c/grammar.json", functions(25), 11, ["", " ", "\n", "1", "x", ";", "(", ")", "{", "}", "/* c */", "int x;", "a = b;", "\n#define A 1\n"], ["", " ", "\n", "1", "/* c */", "  "]);
+
+str lua_source(int count) {
+    str one = "local function f(a, b)\n  -- a comment\n  local s = [==[ long ]] string ]==]\n  --[[ block\n  comment ]]\n  return a + b, s\nend\n\n";
+    return one.repeat(count);
+}
+
+exercise(check, "lua", "tests/data/lua/grammar.json", lua_source(20), 21, ["", " ", "\n", "1", "x", "[[", "]]", "--", "--[[", "]==]", "[==[", "end", "(", ")"], ["", " ", "\n", "1", "-- c\n", "  "]);
 check.finish();
