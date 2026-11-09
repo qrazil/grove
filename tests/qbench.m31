@@ -1,0 +1,81 @@
+/* Query speed: parse, a full query run and windowed runs.
+ *
+ *   qbench GRAMMAR.json QUERY.scm TEXT [WINDOW_BYTES [REPEAT]]
+ *
+ * REPEAT runs every window that many extra times first (for a profiler).
+ *
+ * Prints microseconds; the window is taken at 1/4, 1/2 and 3/4 of the text. Not run by test.sh: a time
+ * is not a fixture. */
+
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_query;
+import core.GRV_tree;
+import io;
+import os;
+import timer;
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            print("cannot read " + path);
+            os.exit(1);
+            return "";
+        }
+    }
+}
+
+int micros(int from_ns) {
+    return (timer.monotonic_ns() - from_ns) / 1000;
+}
+
+List<str> argv = os.arguments();
+if (argv.size() < 4) {
+    print("usage: qbench GRAMMAR.json QUERY.scm TEXT [WINDOW_BYTES [REPEAT]]");
+    os.exit(2);
+}
+int window = 4000;
+int repeat = 1;
+if (argv.size() > 5) {
+    repeat = argv[5].parse_int().or(1);
+}
+if (argv.size() > 4) {
+    window = argv[4].parse_int().or(4000);
+}
+match (GRV_grammar.load(slurp(argv[1]))) {
+    case Err(str reason): {
+        print(reason);
+    }
+    case Ok(GRV_grammar.Grammar grammar): {
+        GRV_lexer.Lexer lexer = GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar)));
+        int began = timer.monotonic_ns();
+        GRV_query.Query query = GRV_query.parse(slurp(argv[2]));
+        print("query load us " + str(micros(began)));
+        str source = slurp(argv[3]);
+        began = timer.monotonic_ns();
+        GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
+        print("parse us " + str(micros(began)) + " bytes " + str(source.size()));
+        began = timer.monotonic_ns();
+        int count = GRV_query.run(query, tree, source, 0, source.size()).size();
+        print("full run us " + str(micros(began)) + " captures " + str(count));
+        for (int quarter in 1 .. 4) {
+            if (repeat > 1) {
+                for (int unused in 0 .. repeat) {
+                    GRV_query.run(query, tree, source, source.size() * quarter / 4, source.size() * quarter / 4 + window);
+                }
+            }
+            for (int again in 0 .. 2) {
+                int from = source.size() * quarter / 4;
+                began = timer.monotonic_ns();
+                int found = GRV_query.run(query, tree, source, from, from + window).size();
+                print("window " + str(window) + " at " + str(quarter) + "/4 us " + str(micros(began)) + " captures " + str(found));
+            }
+        }
+    }
+}

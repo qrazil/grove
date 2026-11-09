@@ -102,8 +102,12 @@ pub type Query {
     List<List<str>> predicate_arguments = [];
     List<List<int>> predicate_kinds = [];
     Map<str, List<int>> by_type = {};
-    List<int> unindexed = [];
-    List<int> sequences = [];
+    pub List<int> unindexed = [];
+    /// per pattern: true when it is only a node type (or alternation of types) with captures, no predicates
+    List<bool> pattern_simple = [];
+    /// whether some predicate looks at ancestors (`#has-ancestor?`, `#has-parent?`), which costs a path per node
+    pub bool needs_ancestors = false;
+    pub List<int> sequences = [];
     Map<str, GRV_find.Finder> finders = {};
 }
 
@@ -377,6 +381,9 @@ void Query.parse_predicate(int pattern) {
             pattern_offsets[pattern] = [capture_id(arguments[0]), arguments[1].parse_int().or(0), arguments[2].parse_int().or(0), arguments[3].parse_int().or(0), arguments[4].parse_int().or(0)];
         }
     } else {
+        if (name.contains("has-ancestor") || name.contains("has-parent")) {
+            needs_ancestors = true;
+        }
         predicate_name.push(name);
         predicate_arguments.push(arguments);
         predicate_kinds.push(kinds);
@@ -458,13 +465,68 @@ int Query.parse_pattern(int pattern) {
     return node;
 }
 
+/* The node types a pattern root can only match, or none when any type may match it: a named or anonymous
+ * node has its one type, an alternation of those the union, a group of one pattern that pattern's. */
+List<str> Query.types_of(int node) {
+    List<str> none = [];
+    int kind = node_kind[node];
+    if (kind == K_NAMED || kind == K_ANON) {
+        return [node_name[node]];
+    }
+    if (kind == K_ALT || (kind == K_GROUP && node_items[node].size() == 1)) {
+        List<str> out = [];
+        for (int item in node_items[node]) {
+            List<str> inner = types_of(item_node[item]);
+            if (inner.size() == 0) {
+                return none;
+            }
+            for (str name in inner) {
+                if (!out.contains(name)) {
+                    out.push(name);
+                }
+            }
+        }
+        return out;
+    }
+    return none;
+}
+
+// a node pattern that checks nothing but the type
+bool Query.is_plain_type(int node) {
+    int kind = node_kind[node];
+    return (kind == K_NAMED || kind == K_ANON) && node_items[node].size() == 0 && node_negated[node].size() == 0 && node_anchored_end[node] == 0;
+}
+
+bool Query.is_simple(int root, int pattern) {
+    if (pattern_predicates[pattern].size() > 0) {
+        return false;
+    }
+    if (is_plain_type(root)) {
+        return true;
+    }
+    if (node_kind[root] != K_ALT) {
+        return false;
+    }
+    for (int item in node_items[root]) {
+        int alternative = item_node[item];
+        if (!is_plain_type(alternative) || node_captures[alternative].size() > 0 || item_quantifier[item] != Q_ONE) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Query.index_pattern(int pattern) {
     int root = pattern_root[pattern];
     int kind = node_kind[root];
-    if (kind == K_NAMED || kind == K_ANON) {
-        List<int> list = by_type.get(node_name[root]).or([]);
-        list.push(pattern);
-        by_type.set(node_name[root], list);
+    pattern_simple.push(is_simple(root, pattern));
+    List<str> types = types_of(root);
+    if (types.size() > 0) {
+        for (str name in types) {
+            List<int> list = by_type.get(name).or([]);
+            list.push(pattern);
+            by_type.set(name, list);
+        }
     } else if (kind == K_GROUP && node_items[root].size() > 1) {
         sequences.push(pattern);
     } else {
@@ -533,6 +595,8 @@ type Run {
     GRV_lang.Lang lang;
     str text;
     List<Found> found = [];
+    // the visible children of a node, kept for the length of one run: many patterns ask for the same node
+    Map<int, List<View>> kid_cache = {};
 }
 
 str Run.type_of(View view) {
@@ -550,7 +614,7 @@ bool Run.is_named(View view) {
 }
 
 // the visible children of `parent`, hidden nodes replaced by theirs
-void Run.collect(int parent, int parent_start, int inherited, List<View> out) {
+void Run.collect(int parent, int parent_start, int inherited, List<View> out, int from, int last) {
     int production_id = tree.production[parent];
     int child_number = 0;
     int cursor = parent_start;
@@ -561,6 +625,12 @@ void Run.collect(int parent, int parent_start, int inherited, List<View> out) {
         int kid = tree.kids[tree.kid_at[parent] + child_index];
         int kid_start = cursor + tree.padding[kid];
         cursor = kid_start + tree.size[kid];
+        if (cursor < from || kid_start > last) {
+            if (!tree.has_flag(kid, GRV_tree.FLAG_EXTRA) && production_id >= 0) {
+                child_number = child_number + 1;
+            }
+            continue;
+        }
         int field = -1;
         int alias = -1;
         if (!tree.has_flag(kid, GRV_tree.FLAG_EXTRA) && production_id >= 0) {
@@ -579,14 +649,29 @@ void Run.collect(int parent, int parent_start, int inherited, List<View> out) {
         if (is_visible) {
             out.push(View(kid, kid_start, kid_start + tree.size[kid], alias, use_field));
         } else {
-            collect(kid, kid_start, use_field, out);
+            collect(kid, kid_start, use_field, out, from, last);
         }
     }
 }
 
 List<View> Run.kids_of(View view) {
+    match (kid_cache.get(view.node)) {
+        case Some(List<View> known): {
+            return known;
+        }
+        case None: {
+        }
+    }
     List<View> out = [];
-    collect(view.node, view.start, -1, out);
+    collect(view.node, view.start, -1, out, 0, 9223372036854775807);
+    kid_cache.set(view.node, out);
+    return out;
+}
+
+// only the children that meet the byte range [from, last]
+List<View> Run.kids_in(View view, int from, int last) {
+    List<View> out = [];
+    collect(view.node, view.start, -1, out, from, last);
     return out;
 }
 
@@ -613,7 +698,12 @@ List<List<Cap>> Run.match_node(int pattern_node, View view, List<str> ancestors)
     } else if (kind == K_ALT) {
         List<List<Cap>> out = [];
         for (int item in query.node_items[pattern_node]) {
-            for (List<Cap> binding in match_node(query.item_node[item], view, ancestors)) {
+            int alternative = query.item_node[item];
+            int alternative_kind = query.node_kind[alternative];
+            if ((alternative_kind == K_NAMED || alternative_kind == K_ANON) && query.node_name[alternative] != type_name) {
+                continue;
+            }
+            for (List<Cap> binding in match_node(alternative, view, ancestors)) {
                 out.push(binding);
             }
         }
@@ -638,8 +728,11 @@ List<List<Cap>> Run.match_node(int pattern_node, View view, List<str> ancestors)
                 }
             }
         }
-        List<str> inner = ancestors.slice(0, ancestors.size());
-        inner.push(type_name);
+        List<str> inner = ancestors;
+        if (query.needs_ancestors) {
+            inner = ancestors.slice(0, ancestors.size());
+            inner.push(type_name);
+        }
         List<Cap> start_binding = [];
         bindings = sequence(pattern_node, 0, kids, 0, start_binding, inner, -1, false);
     }
@@ -695,7 +788,12 @@ List<List<Cap>> Run.sequence(int pattern_node, int item_number, List<View> kids,
         if (field != "" && (kid.field < 0 || lang.field_names[kid.field] != field)) {
             continue;
         }
-        for (List<Cap> sub in match_node(query.item_node[item], kid, ancestors)) {
+        int wanted = query.item_node[item];
+        int wanted_kind = query.node_kind[wanted];
+        if ((wanted_kind == K_NAMED || wanted_kind == K_ANON) && (is_named(kid) != (wanted_kind == K_NAMED) || type_of(kid) != query.node_name[wanted])) {
+            continue;
+        }
+        for (List<Cap> sub in match_node(wanted, kid, ancestors)) {
             List<Cap> joined = clone_caps(current);
             for (Cap cap in sub) {
                 joined.push(cap);
@@ -863,6 +961,35 @@ void Run.emit(int pattern, List<Cap> binding) {
     }
 }
 
+// a pattern that only checks the type: its captures without building a match
+void Run.emit_simple(int pattern, View view, str type_name, bool is_named_view) {
+    int root = query.pattern_root[pattern];
+    if (query.node_kind[root] == K_ALT) {
+        bool is_hit = false;
+        for (int item in query.node_items[root]) {
+            int alternative = query.item_node[item];
+            bool is_named_alternative = query.node_kind[alternative] == K_NAMED;
+            if (is_named_alternative == is_named_view && query.node_name[alternative] == type_name) {
+                is_hit = true;
+                break;
+            }
+        }
+        if (!is_hit) {
+            return;
+        }
+    } else if ((query.node_kind[root] == K_NAMED) != is_named_view || query.node_name[root] != type_name) {
+        return;
+    }
+    List<int> offsets = query.pattern_offsets[pattern];
+    for (int capture in query.node_captures[root]) {
+        Found one = Found(query.capture_names[capture], view.start, view.stop, pattern);
+        if (offsets.size() == 5 && offsets[0] == capture) {
+            one.offset = [offsets[1], offsets[2], offsets[3], offsets[4]];
+        }
+        found.push(one);
+    }
+}
+
 void Run.try_patterns(List<int> patterns, View view, List<str> ancestors) {
     for (int pattern in patterns) {
         for (List<Cap> binding in match_node(query.pattern_root[pattern], view, ancestors)) {
@@ -872,17 +999,33 @@ void Run.try_patterns(List<int> patterns, View view, List<str> ancestors) {
 }
 
 void Run.visit(View view, List<str> ancestors, int from, int last) {
-    List<int> typed = query.by_type.get(type_of(view)).or([]);
+    str type_name = type_of(view);
+    List<int> typed = query.by_type.get(type_name).or([]);
     if (typed.size() > 0) {
-        try_patterns(typed, view, ancestors);
+        bool is_named_view = is_named(view);
+        for (int pattern in typed) {
+            if (query.pattern_simple[pattern]) {
+                emit_simple(pattern, view, type_name, is_named_view);
+            } else {
+                for (List<Cap> binding in match_node(query.pattern_root[pattern], view, ancestors)) {
+                    emit(pattern, binding);
+                }
+            }
+        }
     }
     try_patterns(query.unindexed, view, ancestors);
-    List<View> kids = kids_of(view);
-    if (query.sequences.size() > 0 && kids.size() > 0) {
-        run_sequences(kids, ancestors, type_of(view));
+    if (query.sequences.size() > 0) {
+        List<View> all = kids_of(view);
+        if (all.size() > 0) {
+            run_sequences(all, ancestors, type_of(view));
+        }
     }
-    List<str> inner = ancestors.slice(0, ancestors.size());
-    inner.push(type_of(view));
+    List<View> kids = kids_in(view, from, last);
+    List<str> inner = ancestors;
+    if (query.needs_ancestors) {
+        inner = ancestors.slice(0, ancestors.size());
+        inner.push(type_of(view));
+    }
     for (View kid in kids) {
         if (kid.stop >= from && kid.start <= last) {
             visit(kid, inner, from, last);
@@ -924,11 +1067,17 @@ pub List<Found> run(Query query, GRV_tree.Tree tree, str text, int from, int las
     }
     runner.found.sort();
     List<Found> out = [];
-    Map<str, bool> seen = {};
     for (Found one in runner.found) {
-        str identity = one.name + "#" + str(one.start) + "#" + str(one.stop) + "#" + str(one.pattern);
-        if (!seen.contains(identity)) {
-            seen.set(identity, true);
+        bool is_duplicate = false;
+        int back = out.size() - 1;
+        while (back >= 0 && out[back].start == one.start && out[back].stop == one.stop && out[back].pattern == one.pattern) {
+            if (out[back].name == one.name) {
+                is_duplicate = true;
+                break;
+            }
+            back = back - 1;
+        }
+        if (!is_duplicate) {
             out.push(one);
         }
     }
