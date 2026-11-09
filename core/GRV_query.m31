@@ -1083,3 +1083,34 @@ pub List<Found> run(Query query, GRV_tree.Tree tree, str text, int from, int las
     }
     return out;
 }
+
+/** The named nodes of the visible tree that contain byte `position`, outermost first, as `start, stop`
+ * pairs; consecutive nodes with the same range are listed once. */
+pub List<int> ancestry(GRV_tree.Tree tree, int position) {
+    Run runner = Run(Query(), tree, tree.lang, "");
+    List<int> out = [];
+    if (tree.root < 0) {
+        return out;
+    }
+    int root_start = tree.padding[tree.root];
+    View view = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1);
+    bool is_going = true;
+    while (is_going) {
+        if (runner.is_named(view)) {
+            int count = out.size();
+            if (count < 2 || out[count - 2] != view.start || out[count - 1] != view.stop) {
+                out.push(view.start);
+                out.push(view.stop);
+            }
+        }
+        is_going = false;
+        for (View kid in runner.kids_in(view, position, position)) {
+            if (kid.start <= position && position < kid.stop) {
+                view = kid;
+                is_going = true;
+                break;
+            }
+        }
+    }
+    return out;
+}

@@ -1592,3 +1592,87 @@ or damage is a miss, never an error, and the table is rebuilt and the file repla
 cache, not a failure. Measured (m31 -O2): javascript 4 165 ms to build, 91 to 95 ms to read (2.0 MB);
 bash 29 440 ms (the LALR fallback, with the failed attempt) and 63 ms (2.9 MB). The fork log is not cached
 (diagnostics only). Not done: a size limit or cleaning of old versions' files; a binary format.
+
+## 20. Query speed and the editor seam (version 0.7.0)
+
+### 20.1 What made queries faster
+
+Section 18.5 measured 0.5.0: a full run slower than the parse, a window not proportional to its size.
+0.7.0 changes, each found by timing one query at a time (`tests/qbench.m31`):
+
+- patterns are indexed under every type they can match: an alternation of types under each of them, a group
+  of one pattern under that pattern's type (most predicated patterns and the keyword alternations were
+  tried at every node); an alternation tries only the alternative of the node's type;
+- a pattern that only checks a type emits its captures without building a match;
+- children are collected only where they meet the byte window, and kept for the run for nodes that several
+  patterns ask about; duplicates are found by comparing neighbours after the sort; ancestor paths are built
+  only when some predicate (`#has-ancestor?`, `#has-parent?`) uses them.
+
+Full run: C 280 KB 153 to 49 ms, Lua 53 KB 148 to 63 ms (captures unchanged: 45 fixtures and the 109 C,
+299 Lua and 284 JSON real files still identical to nvim's).
+
+### 20.2 Windows, measured
+
+m31 -O2, one core, 4 000-byte window at a quarter, half and three quarters of the file, vendored
+nvim-treesitter highlights (`experiments/results/query_window.txt`):
+
+| file | size | captures in the window | window time |
+|---|--:|--:|--:|
+| C `stdio.h` | 35 KB | 427 to 462 | 1.2 to 1.5 ms |
+| JSON world.json | 1.2 MB | 721 to 793 | 1.1 to 1.6 ms |
+| Lua `lualine.lua` | 27 KB | 522 to 873 | 1.8 to 3.6 ms |
+| Lua `tokyonight_day.lua` (one table of 600 fields) | 54 KB | 837 to 986 | 5.2 to 5.6 ms |
+| C `nl80211.h` (windows in a 70 KB comment) | 349 KB | 3 | 24 ms |
+
+The target "under 2 ms for C, Lua and JSON windows" is met for C and JSON and for the sparser Lua windows, not
+for dense Lua (about 3.5 us per capture) and not for the two shapes where the cost is not the window: a node
+with very many children that a pattern matches as a whole (`(table_constructor (field ...))` scans every
+field of the table, the cost of one pattern was 3.4 of the 5.4 ms), and a documentation-comment predicate
+(`#lua-match?` on a 70 KB comment runs the NFA over all of it). The first needs matching restricted to the
+children near the window when the pattern has no anchors and the parent's capture does not depend on them;
+the second needs the predicate regex run on a prefix/suffix check first. Neither is done. What dominates
+the rest is allocation (lists of bindings and of views; 190 million reference-count operations for 900
+windows), so the next step is a flat, allocation-free matcher for patterns of depth one and two.
+
+### 20.3 `GRV_med`: the `MED_ts` seam
+
+`GRV_med.Backend` has the calls of m3's `MED_ts.Backend` that grove answers, with the same names and shapes
+(the types `Range`, `Span`, `Injection`, `Edit` have m3's fields; the adapter on m3's side copies them,
+since m31 types are nominal). The contract, which the m3 side can rely on:
+
+- `parse(document, language, lines)` and `edit(document, edit, lines)` only record the text (join of the
+  lines with "\n", a line table) and move the old tree over the edit; no parsing, no tables. An `edit` during a
+  slice drops the slice and starts the reparse from the new text.
+- `did_tick(budget_us)` is the only call that works: it loads the tables of a language the first time one of
+  its documents is pending (from `GRV_cache` when present, SPEC 19.4; a cold build of a big grammar is one
+  unit that cannot be sliced, so the editor ticks it on first open in the background), then parses or
+  reparses pending documents in turn for what is left of the budget, at least one batch of 8 parser rounds
+  per call, and returns true when a document finished a parse.
+- `version(document)`: -1 unknown, 0 after `parse` until the first parse finishes, then +1 per finished
+  parse and at no other time.
+- Before the first parse finishes, `highlights` and `selection_chain` are empty (the chain falls through to
+  the lexical backend). After an edit the old tree, moved over the edit, answers until the version changes.
+- `highlights(document, first_row, last_row)` runs the language's highlights query over the bytes of those
+  rows and returns `Span`s in the order `run` gives (start, longer first, pattern), names starting with `_`
+  dropped, `#offset!` applied. `selection_chain(document, row, column)` gives the named nodes containing the
+  position, innermost first, consecutive equal ranges once.
+- `objects`, `folds`, `indent` and `injections` answer empty / -1: their query files and evaluation are not
+  written.
+- A language whose grammar or tables fail is not offered (`has_language` false afterwards, `error_of` says
+  why); a highlights query that fails to parse leaves the language usable and highlights empty.
+- Trees are compacted when the arena holds more than four times the nodes it held after its first parse
+  plus 100 000, at the end of a finished parse; compaction is O(tree) and is not sliced.
+
+Measured through the seam (`tests/medbench.m31`, budget 1 000 us, m31 -O2): C 8 112 lines: first tick 2.36 s
+(tables, uncached; the cache brings it to about 0.1 s), then 26 ticks, the slowest 1.9 ms; JSON 1.2 MB
+(43 729 lines): `parse` call 2.4 ms, 497 ticks, the slowest 8.2 ms (8 times the budget; cause not
+yet investigated, to be found before this is on the key path),
+`highlights` of 60 rows 0.7 ms, `edit` 1.4 ms, reparse after one edit 0.2 ms in 1 tick; Lua 712 lines: 125 ms
+for the tables, 30 ticks, `highlights` of 60 rows 1.8 ms, reparse after an edit 3.9 ms (10 000-node tree,
+89 tokens lexed; the same as the parser alone, not a regression).
+
+### 20.4 What the m3 side still has to do
+
+Convert the four types; call `did_tick` from its loop with a small budget and redraw when it returns true;
+compare `version` with the one it drew with; set `cache_directory`; decide where the grammar and query texts
+come from (`add_language`). The 5 MB and 10 000-byte line limits of `MED_ts.is_large` stay on m3's side.

@@ -1,0 +1,446 @@
+/* The seam to the editor: grove as a backend for m3's `MED_ts` (SPEC section 10 and 20).
+ *
+ * `Backend` has the calls of `MED_ts.Backend` that grove answers (`has_language`, `parse`, `edit`,
+ * `did_tick`, `version`, `close`, `highlights`, `objects`, `folds`, `indent`, `injections`,
+ * `selection_chain`) with the same names and shapes; the types `Range`, `Span` and `Edit` here have the
+ * fields of m3's and the m3 side converts them one for one (interfaces are structural, types are not).
+ *
+ * The contract:
+ *
+ * - `parse` and `edit` only record the new text (and move the old tree over the edit); they never parse
+ *   and never touch a table. They are O(size of the text) for the join of the lines and the line table.
+ * - `did_tick(budget_us)` is the only place that works: it loads tables (from the cache, SPEC 19.4; a
+ *   cold build of a big grammar is one unit of work that cannot be sliced, which is why the editor
+ *   starts it in the background on first open), parses and reparses documents in turn, each for what is
+ *   left of the budget, and returns true when some document finished a parse, so the screen should be
+ *   drawn again. A call runs at least one parser round per pending document it reaches, so a budget of
+ *   0 still makes progress.
+ * - `version(document)` is -1 for an unknown document, 0 after `parse` until the first parse finishes,
+ *   and then goes up by one every time a parse of that document finishes. It never changes anywhere
+ *   else, so "version unchanged" means "the answers of the last tick still stand".
+ * - Until the first parse finishes `highlights` is empty and the chain falls through to the lexical
+ *   backend. After an `edit` the old tree, moved over the edit, still answers (a little wrong near the
+ *   edit) until the reparse finishes and the version changes.
+ * - `lines` are the lines of the document without their newline; the text is the lines joined with
+ *   "\\n". Rows are 0-based, columns are byte columns, ranges end exclusive.
+ *
+ * `objects`, `folds`, `indent` and `injections` answer empty (-1 for `indent`): their query files and
+ * evaluation are not written yet. */
+
+import core.GRV_cache;
+import core.GRV_edit;
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_query;
+import core.GRV_tree;
+import timer;
+
+pub type Range {
+    pub int start_row;
+    pub int start_col;
+    pub int end_row;
+    pub int end_col;
+}
+
+pub type Span {
+    pub Range range;
+    pub str capture;
+}
+
+pub type Injection {
+    pub Range range;
+    pub str language;
+}
+
+pub type Edit {
+    pub int start_row;
+    pub int start_col;
+    pub int old_end_row;
+    pub int old_end_col;
+    pub int new_end_row;
+    pub int new_end_col;
+}
+
+type Language {
+    str name;
+    str grammar_text;
+    str highlights_text;
+    bool is_ready = false;
+    bool is_failed = false;
+    str error_text = "";
+    Option<GRV_lexer.Lexer> lexer = Option<GRV_lexer.Lexer>.None;
+    GRV_query.Query query = GRV_query.Query();
+}
+
+type Doc {
+    int id;
+    str language;
+    List<str> lines;
+    str text;
+    List<int> starts;
+    int version = 0;
+    Option<GRV_tree.Tree> tree = Option<GRV_tree.Tree>.None;
+    Option<GRV_glr.Parser> parser = Option<GRV_glr.Parser>.None;
+    bool is_pending = true;
+    int live_nodes = 0;
+}
+
+// start offset of every line of `lines` joined with "\n"
+List<int> line_starts(List<str> lines) {
+    List<int> starts = [];
+    int position = 0;
+    for (str line in lines) {
+        starts.push(position);
+        position = position + line.size() + 1;
+    }
+    if (starts.size() == 0) {
+        starts.push(0);
+    }
+    return starts;
+}
+
+int offset_of(List<int> starts, int row, int column, int size) {
+    if (row < 0) {
+        return 0;
+    }
+    if (row >= starts.size()) {
+        return size;
+    }
+    int position = starts[row] + column;
+    if (position > size) {
+        return size;
+    }
+    return position;
+}
+
+int row_of(List<int> starts, int position) {
+    int low = 0;
+    int high = starts.size() - 1;
+    while (low < high) {
+        int middle = (low + high + 1) / 2;
+        if (starts[middle] <= position) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    return low;
+}
+
+/// Where to keep the table cache: "" for none (tables are built every time).
+pub type Backend {
+    pub str cache_directory = "";
+    Map<str, Language> languages = {};
+    Map<int, Doc> docs = {};
+    List<int> queue = [];
+    /// how many nodes a tree may hold, as a multiple of what it held after its last compaction
+    pub int compactions = 0;
+}
+
+/// Make a grammar available: its grammar.json text and its highlights query (the text of a .scm file).
+pub void Backend.add_language(str name, str grammar_text, str highlights_text) {
+    languages.set(name, Language(name, grammar_text, highlights_text));
+}
+
+pub bool Backend.has_language(str language) {
+    match (languages.get(language)) {
+        case Some(Language known): {
+            return !known.is_failed;
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// Why a language failed to load, or "" (for logs; the editor just sees no answers).
+pub str Backend.error_of(str language) {
+    match (languages.get(language)) {
+        case Some(Language known): {
+            return known.error_text;
+        }
+        case None: {
+            return "unknown language";
+        }
+    }
+}
+
+pub void Backend.parse(int document, str language, List<str> lines) {
+    str text = lines.join("\n");
+    Doc doc = Doc(document, language, lines, text, line_starts(lines));
+    docs.set(document, doc);
+    if (!queue.contains(document)) {
+        queue.push(document);
+    }
+}
+
+pub void Backend.edit(int document, Edit change, List<str> lines) {
+    match (docs.get(document)) {
+        case None: {
+            return;
+        }
+        case Some(Doc doc): {
+            int old_size = doc.text.size();
+            int start = offset_of(doc.starts, change.start_row, change.start_col, old_size);
+            int old_end = offset_of(doc.starts, change.old_end_row, change.old_end_col, old_size);
+            str text = lines.join("\n");
+            List<int> starts = line_starts(lines);
+            int new_end = offset_of(starts, change.new_end_row, change.new_end_col, text.size());
+            if (old_end < start) {
+                old_end = start;
+            }
+            if (new_end < start) {
+                new_end = start;
+            }
+            match (doc.tree) {
+                case Some(GRV_tree.Tree tree): {
+                    GRV_edit.apply(tree, start, old_end, new_end);
+                }
+                case None: {
+                }
+            }
+            doc.parser = Option<GRV_glr.Parser>.None;
+            doc.lines = lines;
+            doc.text = text;
+            doc.starts = starts;
+            doc.is_pending = true;
+            if (!queue.contains(document)) {
+                queue.push(document);
+            }
+        }
+    }
+}
+
+pub int Backend.version(int document) {
+    match (docs.get(document)) {
+        case Some(Doc doc): {
+            return doc.version;
+        }
+        case None: {
+            return -1;
+        }
+    }
+}
+
+pub void Backend.close(int document) {
+    docs.remove(document);
+    List<int> kept = [];
+    for (int one in queue) {
+        if (one != document) {
+            kept.push(one);
+        }
+    }
+    queue = kept;
+}
+
+// load the tables and the query of a language (the one step of did_tick that is not sliced)
+void Backend.make_ready(Language language) {
+    match (GRV_grammar.load(language.grammar_text)) {
+        case Err(str reason): {
+            language.is_failed = true;
+            language.error_text = reason;
+        }
+        case Ok(GRV_grammar.Grammar grammar): {
+            GRV_lang.Lang lang = GRV_lang.build(grammar);
+            GRV_lr.Table table = GRV_cache.build_cached(lang, language.grammar_text, cache_directory);
+            if (table.is_failed) {
+                language.is_failed = true;
+                language.error_text = table.error_text;
+                return;
+            }
+            language.lexer = Option<GRV_lexer.Lexer>.Some(GRV_lexer.make(table));
+            GRV_query.Query query = GRV_query.parse(language.highlights_text);
+            if (query.is_failed) {
+                language.error_text = query.error_text;
+            } else {
+                language.query = query;
+            }
+            language.is_ready = true;
+        }
+    }
+}
+
+pub bool Backend.did_tick(int budget_us) {
+    int began = timer.monotonic_ns();
+    int budget_ns = budget_us * 1000;
+    bool is_changed = false;
+    while (queue.size() > 0) {
+        int document = queue[0];
+        match (docs.get(document)) {
+            case None: {
+                queue.remove_at(0);
+                continue;
+            }
+            case Some(Doc doc): {
+                match (languages.get(doc.language)) {
+                    case None: {
+                        queue.remove_at(0);
+                        continue;
+                    }
+                    case Some(Language language): {
+                        if (!language.is_ready && !language.is_failed) {
+                            make_ready(language);
+                        }
+                        match (language.lexer) {
+                            case None: {
+                                // failed: no tree will come
+                                queue.remove_at(0);
+                                continue;
+                            }
+                            case Some(GRV_lexer.Lexer lexer): {
+                                int left = budget_ns - (timer.monotonic_ns() - began);
+                                if (left < 0) {
+                                    left = 0;
+                                }
+                                if (did_finish_step(doc, lexer, left)) {
+                                    queue.remove_at(0);
+                                    is_changed = true;
+                                } else {
+                                    return is_changed;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (timer.monotonic_ns() - began >= budget_ns) {
+            return is_changed;
+        }
+    }
+    return is_changed;
+}
+
+// run the parser of `doc` for about `left_ns`; true when its tree is finished (and the version went up)
+bool Backend.did_finish_step(Doc doc, GRV_lexer.Lexer lexer, int left_ns) {
+    match (doc.parser) {
+        case None: {
+            doc.parser = Option<GRV_glr.Parser>.Some(GRV_glr.begin(lexer, doc.text, doc.tree));
+        }
+        case Some(GRV_glr.Parser started): {
+        }
+    }
+    match (doc.parser) {
+        case None: {
+            return false;
+        }
+        case Some(GRV_glr.Parser parser): {
+            if (!parser.has_finished_after(left_ns)) {
+                return false;
+            }
+            GRV_tree.Tree tree = parser.tree;
+            if (doc.live_nodes > 0 && tree.arena_size() > doc.live_nodes * 4 + 100000) {
+                tree = tree.compact();
+                compactions = compactions + 1;
+            }
+            if (doc.live_nodes == 0 || tree.arena_size() < doc.live_nodes) {
+                doc.live_nodes = tree.arena_size();
+            }
+            doc.tree = Option<GRV_tree.Tree>.Some(tree);
+            doc.parser = Option<GRV_glr.Parser>.None;
+            doc.is_pending = false;
+            doc.version = doc.version + 1;
+            return true;
+        }
+    }
+}
+
+pub List<Span> Backend.highlights(int document, int first_row, int last_row) {
+    List<Span> out = [];
+    match (docs.get(document)) {
+        case None: {
+            return out;
+        }
+        case Some(Doc doc): {
+            match (doc.tree) {
+                case None: {
+                    return out;
+                }
+                case Some(GRV_tree.Tree tree): {
+                    match (languages.get(doc.language)) {
+                        case None: {
+                            return out;
+                        }
+                        case Some(Language language): {
+                            if (tree.root < 0 || language.query.pattern_count == 0) {
+                                return out;
+                            }
+                            int size = doc.text.size();
+                            int from = offset_of(doc.starts, first_row, 0, size);
+                            int last = size;
+                            if (last_row + 1 < doc.starts.size()) {
+                                last = doc.starts[last_row + 1];
+                            }
+                            for (GRV_query.Found one in GRV_query.run(language.query, tree, doc.text, from, last)) {
+                                if (one.name.starts_with("_")) {
+                                    continue;
+                                }
+                                Range range = range_of(doc.starts, one.start, one.stop);
+                                if (one.offset.size() == 4) {
+                                    range = Range(range.start_row + one.offset[0], range.start_col + one.offset[1], range.end_row + one.offset[2], range.end_col + one.offset[3]);
+                                }
+                                out.push(Span(range, one.name));
+                            }
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub List<Range> Backend.selection_chain(int document, int row, int column) {
+    List<Range> out = [];
+    match (docs.get(document)) {
+        case None: {
+            return out;
+        }
+        case Some(Doc doc): {
+            match (doc.tree) {
+                case None: {
+                    return out;
+                }
+                case Some(GRV_tree.Tree tree): {
+                    int position = offset_of(doc.starts, row, column, doc.text.size());
+                    List<int> chain = GRV_query.ancestry(tree, position);
+                    // innermost first
+                    int index = chain.size() - 2;
+                    while (index >= 0) {
+                        out.push(range_of(doc.starts, chain[index], chain[index + 1]));
+                        index = index - 2;
+                    }
+                    return out;
+                }
+            }
+        }
+    }
+}
+
+pub List<Range> Backend.objects(int document, str kind, int row, int column) {
+    List<Range> none = [];
+    return none;
+}
+
+pub List<Range> Backend.folds(int document) {
+    List<Range> none = [];
+    return none;
+}
+
+pub int Backend.indent(int document, int row) {
+    return -1;
+}
+
+pub List<Injection> Backend.injections(int document) {
+    List<Injection> none = [];
+    return none;
+}
+
+Range range_of(List<int> starts, int start, int stop) {
+    int start_row = row_of(starts, start);
+    int stop_row = row_of(starts, stop);
+    return Range(start_row, start - starts[start_row], stop_row, stop - starts[stop_row]);
+}

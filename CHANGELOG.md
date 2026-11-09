@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 (query speed, the editor seam)
+
+- Queries: patterns indexed under every type they can match (alternations, groups of one), type-only
+  patterns emit directly, children collected only inside the window, neighbour dedupe, ancestor paths only
+  when needed. Full run C 280 KB 153 to 49 ms; 4 000-byte windows 1.1 to 1.6 ms for C and JSON, 1.8 to 3.6 ms
+  for dense Lua (target 2 ms not met there; SPEC 20.2).
+- `GRV_med.Backend`: the `MED_ts` seam. `parse`/`edit` only record, `did_tick(budget_us)` does the work
+  (tables from the cache, time-sliced parse and reparse), `version(document)` changes only when a parse
+  finishes; `highlights(rows)`, `selection_chain`; `objects`, `folds`, `indent`, `injections` are stubs.
+  `GRV_query.ancestry`. SPEC 20.3.
+- Tests: `t_med` (31). Tools: `tests/qbench.m31`, `tests/medbench.m31`.
+
 ## 0.6.0 (conflict resolution, table cache)
 
 - Versions of the GLR parser merge when their stacks have the same shape (states, error marks, scanner

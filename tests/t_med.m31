@@ -1,0 +1,128 @@
+/* The editor seam (GRV_med): the version and tick contract, highlights by rows, edits, time-sliced work
+ * and the selection chain, on json. No wall-clock thresholds: slicing is checked by counting ticks. */
+
+import core.GRV_med;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+str query_text = "(string) @string\n(number) @number\n[(true) (false)] @boolean\n(pair key: (string) @property)\n";
+GRV_med.Backend backend = GRV_med.Backend();
+backend.add_language("json", read_or_empty("tests/data/json/grammar.json"), query_text);
+
+str show(List<GRV_med.Span> spans) {
+    List<str> parts = [];
+    for (GRV_med.Span span in spans) {
+        parts.push(span.capture + "@" + str(span.range.start_row) + ":" + str(span.range.start_col) + "-" + str(span.range.end_row) + ":" + str(span.range.end_col));
+    }
+    return parts.join(" ");
+}
+
+int count_of(List<GRV_med.Span> spans, str capture) {
+    int count = 0;
+    for (GRV_med.Span span in spans) {
+        if (span.capture == capture) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+check.ok("has json", backend.has_language("json"));
+check.ok("no cobol", !backend.has_language("cobol"));
+check.eq_int("unknown document", backend.version(7), -1);
+// parse is only a request
+List<str> lines = ["{\"a\": [1, true],", " \"b\": 22}"];
+backend.parse(1, "json", lines);
+check.eq_int("version 0 after parse", backend.version(1), 0);
+check.eq_str("no highlights before the first tick", show(backend.highlights(1, 0, 1)), "");
+check.eq_int("no chain before the first tick", backend.selection_chain(1, 0, 7).size(), 0);
+// a budget of 0 still makes progress: ticks of nothing finish a small parse
+int idle = 0;
+bool is_first = false;
+while (!is_first && idle < 1000) {
+    is_first = backend.did_tick(0);
+    idle = idle + 1;
+}
+check.ok("ticks of budget 0 finish a small parse", is_first);
+check.eq_int("version 1", backend.version(1), 1);
+check.eq_str("highlights", show(backend.highlights(1, 0, 1)), "string@0:1-0:4 property@0:1-0:4 number@0:7-0:8 boolean@0:10-0:14 string@1:1-1:4 property@1:1-1:4 number@1:6-1:8");
+check.eq_str("rows are respected", show(backend.highlights(1, 1, 1)), "string@1:1-1:4 property@1:1-1:4 number@1:6-1:8");
+check.ok("an idle tick reports nothing", !backend.did_tick(1000));
+check.eq_int("version stays", backend.version(1), 1);
+// the chain, innermost first
+List<GRV_med.Range> chain = backend.selection_chain(1, 0, 7);
+check.ok("chain has several levels", chain.size() >= 4);
+check.eq_str("chain starts at the number", str(chain[0].start_row) + ":" + str(chain[0].start_col) + "-" + str(chain[0].end_row) + ":" + str(chain[0].end_col), "0:7-0:8");
+GRV_med.Range outer = chain[chain.size() - 1];
+check.eq_str("chain ends at the document", str(outer.start_row) + ":" + str(outer.start_col) + "-" + str(outer.end_row) + ":" + str(outer.end_col), "0:0-1:9");
+// an edit: 22 becomes 333 on row 1; the version moves only when the tick finishes
+List<str> edited = ["{\"a\": [1, true],", " \"b\": 333}"];
+backend.edit(1, GRV_med.Edit(1, 6, 1, 8, 1, 9), edited);
+check.eq_int("edit does not change the version", backend.version(1), 1);
+check.ok("the old tree still answers", backend.highlights(1, 0, 1).size() > 0);
+check.ok("the tick after the edit reports a change", backend.did_tick(1000000));
+check.eq_int("version 2", backend.version(1), 2);
+check.eq_str("highlights after the edit", show(backend.highlights(1, 1, 1)), "string@1:1-1:4 property@1:1-1:4 number@1:6-1:9");
+// the work is sliced: a big document needs several ticks of a tiny budget, and gives the same answers
+List<str> big = ["["];
+int total = 4000;
+for (int index in 0 .. total) {
+    str comma = ",";
+    if (index == total - 1) {
+        comma = "";
+    }
+    big.push("  {\"k\": " + str(index) + ", \"v\": [true, false, null]}" + comma);
+}
+big.push("]");
+backend.parse(2, "json", big);
+int ticks = 0;
+bool is_done = false;
+while (!is_done && ticks < 100000) {
+    backend.did_tick(1);
+    ticks = ticks + 1;
+    if (backend.version(2) == 1) {
+        is_done = true;
+    }
+}
+check.ok("a big document takes several ticks", ticks > 1);
+check.ok("and finishes", is_done);
+check.eq_int("every number is highlighted", count_of(backend.highlights(2, 0, total + 1), "number"), total);
+// an edit in the middle of a slice restarts it from the new text, and the final answers are the new text's
+List<str> second = big.slice(0, big.size());
+backend.parse(3, "json", second);
+backend.did_tick(1);
+List<str> changed = second.slice(0, second.size());
+changed[10] = "  {\"k\": 10, \"v\": [true, false, 5, 6]},";
+backend.edit(3, GRV_med.Edit(10, 0, 10, second[10].size(), 10, changed[10].size()), changed);
+int more = 0;
+while (backend.version(3) < 1 && more < 100000) {
+    backend.did_tick(1);
+    more = more + 1;
+}
+check.eq_int("the restarted parse finishes", backend.version(3), 1);
+check.eq_int("with the numbers of the new text", count_of(backend.highlights(3, 0, total + 1), "number"), total + 2);
+// close, and a language that failed
+backend.close(1);
+check.eq_int("closed", backend.version(1), -1);
+check.eq_str("closed has no highlights", show(backend.highlights(1, 0, 1)), "");
+backend.add_language("broken", "not json", "");
+backend.parse(4, "broken", ["x"]);
+check.ok("a broken language reports no change", !backend.did_tick(1000));
+check.ok("and is no longer offered", !backend.has_language("broken"));
+check.eq_int("version stays 0", backend.version(4), 0);
+backend.parse(5, "unregistered", ["x"]);
+check.ok("an unregistered language reports no change", !backend.did_tick(1000));
+check.finish();

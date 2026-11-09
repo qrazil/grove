@@ -1,0 +1,72 @@
+/* The editor seam under load: how long each `did_tick` really takes for a budget, how many it needs,
+ * what `edit` and `highlights` cost.
+ *
+ *   medbench GRAMMAR.json QUERY.scm LANGUAGE TEXT [BUDGET_US]
+ *
+ * Not run by test.sh: a time is not a fixture. */
+
+import core.GRV_med;
+import io;
+import os;
+import timer;
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            print("cannot read " + path);
+            os.exit(1);
+            return "";
+        }
+    }
+}
+
+List<str> argv = os.arguments();
+if (argv.size() < 5) {
+    print("usage: medbench GRAMMAR.json QUERY.scm LANGUAGE TEXT [BUDGET_US]");
+    os.exit(2);
+}
+int budget = 1000;
+if (argv.size() > 5) {
+    budget = argv[5].parse_int().or(1000);
+}
+GRV_med.Backend backend = GRV_med.Backend();
+backend.add_language(argv[3], slurp(argv[1]), slurp(argv[2]));
+List<str> lines = slurp(argv[4]).split("\n");
+int began = timer.monotonic_ns();
+backend.parse(1, argv[3], lines);
+print("parse call us " + str((timer.monotonic_ns() - began) / 1000) + " lines " + str(lines.size()));
+began = timer.monotonic_ns();
+backend.did_tick(budget);
+print("first tick (tables, then parse) us " + str((timer.monotonic_ns() - began) / 1000));
+int ticks = 1;
+int slowest = 0;
+began = timer.monotonic_ns();
+while (backend.version(1) < 1) {
+    int tick_began = timer.monotonic_ns();
+    backend.did_tick(budget);
+    int took = (timer.monotonic_ns() - tick_began) / 1000;
+    if (took > slowest) {
+        slowest = took;
+    }
+    ticks = ticks + 1;
+}
+print("ticks " + str(ticks) + " budget us " + str(budget) + " slowest later tick us " + str((slowest)) + " total us " + str((timer.monotonic_ns() - began) / 1000));
+int middle = lines.size() / 2;
+began = timer.monotonic_ns();
+int count = backend.highlights(1, middle, middle + 60).size();
+print("highlights of 60 rows us " + str((timer.monotonic_ns() - began) / 1000) + " spans " + str(count));
+List<str> changed = lines.slice(0, lines.size());
+changed[middle] = changed[middle] + " ";
+began = timer.monotonic_ns();
+backend.edit(1, GRV_med.Edit(middle, lines[middle].size(), middle, lines[middle].size(), middle, lines[middle].size() + 1), changed);
+print("edit call us " + str((timer.monotonic_ns() - began) / 1000));
+began = timer.monotonic_ns();
+ticks = 0;
+while (backend.version(1) < 2) {
+    backend.did_tick(budget);
+    ticks = ticks + 1;
+}
+print("reparse after one edit: ticks " + str(ticks) + " us " + str((timer.monotonic_ns() - began) / 1000));

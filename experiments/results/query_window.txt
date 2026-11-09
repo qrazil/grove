@@ -1,0 +1,7 @@
+Query windows (tests/qbench.m31, m31 -O2, one core, vendored nvim-treesitter highlights, 4000-byte window at 1/4, 1/2, 3/4)
+C    /usr/include/stdio.h (35 KB): full run 10.9 ms (3706 captures); windows 1.2-1.5 ms (427-462 captures)
+JSON world.json (1.2 MB): parse 503 ms, full run 437 ms (230303 captures); windows 1.1-1.6 ms (721-793 captures)
+Lua  lualine.lua (27 KB): full run 15.8 ms (4524 captures); windows 1.8-3.6 ms (522-873 captures)
+Lua  tokyonight_day.lua (54 KB, one 600-field table): windows 5.2-5.6 ms (837-986 captures); (table_constructor (field ...)) alone 3.4 ms
+C    nl80211.h (349 KB; has parse errors): window inside a 70 KB comment 24 ms (3 captures): #lua-match? NFA over the whole comment
+Before 0.7.0 (same files, same machine): C 280 KB bpf.h full run 153 ms (now 49), Lua tokyonight full run 148 ms (now 63), Lua window 8.6 ms (now 5.4)
