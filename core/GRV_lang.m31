@@ -58,6 +58,7 @@ pub type Lang {
     pub ErrorText error_text = ErrorText();
     Map<str, int> terminal_ids = {};
     Map<str, int> aux_ids = {};
+    Map<str, bool> anonymous_keys = {};
     Map<str, bool> seen_productions = {};
     Map<int, str> node_keys = {};
     Map<str, int> field_ids = {};
@@ -183,15 +184,46 @@ int Lang.lex_precedence(int outer, int core) {
 }
 
 // the terminal id of token node `core` (registering it); `rule_name` names it if the whole rule is that token
+bool Lang.has_terminal(int core) {
+    return terminal_ids.contains(key(core));
+}
+
+// record which tokens are written inline in some rule (not as a whole rule body)
+void Lang.note_anonymous(int node) {
+    int type_kind = grammar.kind[node];
+    if (is_token_kind(type_kind)) {
+        anonymous_keys.set(key(node), true);
+        return;
+    }
+    if (type_kind == GRV_grammar.SEQ || type_kind == GRV_grammar.CHOICE) {
+        int member = grammar.first[node];
+        while (member >= 0) {
+            note_anonymous(member);
+            member = grammar.next[member];
+        }
+    } else if (type_kind >= GRV_grammar.REPEAT) {
+        note_anonymous(grammar.first[node]);
+    }
+}
+
+// the STRING node inside a TOKEN or IMMEDIATE_TOKEN (through PREC wrappers) whose content is just that string, or -1
+int Lang.wrapped_string(int core) {
+    if (grammar.kind[core] != GRV_grammar.TOKEN && grammar.kind[core] != GRV_grammar.IMMEDIATE_TOKEN) {
+        return -1;
+    }
+    int current = grammar.first[core];
+    while (grammar.kind[current] >= GRV_grammar.PREC) {
+        current = grammar.first[current];
+    }
+    if (grammar.kind[current] == GRV_grammar.STRING) {
+        return current;
+    }
+    return -1;
+}
+
 int Lang.terminal(int outer, int core, str rule_name) {
     int type_kind = grammar.kind[core];
-    /* A rule that is just a token and the same token written inline are two terminals: Lua's
-     * `empty_statement: ';'` is a node, the `;` between the fields of a table is not (checked against
-     * tree-sitter). */
     str token_key = key(core);
-    if (rule_name != "") {
-        token_key = token_key + "@" + rule_name;
-    }
     match (terminal_ids.get(token_key)) {
         case Some(int known): {
             return known;
@@ -209,6 +241,10 @@ int Lang.terminal(int outer, int core, str rule_name) {
     } else if (type_kind == GRV_grammar.STRING) {
         flags = flags + F_VISIBLE;
         name = grammar.strings[grammar.arg[core]];
+    } else if (wrapped_string(core) >= 0) {
+        // token.immediate('(') and the like: an anonymous token named by its text, like a plain string
+        flags = flags + F_VISIBLE + F_STRING;
+        name = grammar.strings[grammar.arg[wrapped_string(core)]];
     } else {
         name = "token" + str(symbol_name.size());
     }
@@ -458,15 +494,21 @@ pub Lang build(GRV_grammar.Grammar grammar) {
     }
     // terminals, in rule order; a rule that is a bare token names its terminal
     for (int rule in 0 .. rules) {
+        if (lang.token_core(grammar.rule_body[rule]) < 0) {
+            lang.note_anonymous(grammar.rule_body[rule]);
+        }
+    }
+    for (int extra in grammar.extras) {
+        lang.note_anonymous(extra);
+    }
+    for (int rule in 0 .. rules) {
         int body = grammar.rule_body[rule];
         int core = lang.token_core(body);
-        if (core >= 0 && !lang.is_inlined[rule]) {
-            int id = lang.terminal(body, core, grammar.rule_name[rule]);
-            if (lang.symbol_name[id] == grammar.rule_name[rule]) {
-                lang.rule_symbol.push(id);
-            } else {
-                lang.rule_symbol.push(-1);
-            }
+        /* A rule that is just a token is that token's terminal, named by the rule, unless the token is
+         * also written inline somewhere (Lua's `empty_statement: ';'` and the `;` between table fields):
+         * then the terminal is the anonymous one and the rule is a node around it. */
+        if (core >= 0 && !lang.is_inlined[rule] && !lang.anonymous_keys.contains(lang.key(core)) && !lang.has_terminal(core)) {
+            lang.rule_symbol.push(lang.terminal(body, core, grammar.rule_name[rule]));
         } else {
             lang.rule_symbol.push(-1);
             lang.collect(body);
