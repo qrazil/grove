@@ -42,14 +42,26 @@ type Stack {
     List<int> extra = [];
     List<int> scan = [];
     List<int> dirty = [];
+    /* two hashes of the states from the bottom of the stack to this entry (and of whether each entry
+     * holds an error): equal hashes mean the same shape, which is what lets two versions merge */
+    List<int> shape = [];
+    List<int> shape_other = [];
 }
 
-int Stack.push(int top_state, int under, int tree_node, bool is_extra, int scan_index) {
+int Stack.push(int top_state, int under, int tree_node, bool is_extra, int scan_index, int error_mark) {
     int is_dirty = 0;
     if (under >= 0) {
         is_dirty = dirty[under];
     }
     dirty.push(is_dirty);
+    int code = top_state * 2 + error_mark + 1;
+    if (under >= 0) {
+        shape.push((shape[under] * 31337 + code) % 1000000007);
+        shape_other.push((shape_other[under] * 911 + code) % 998244353);
+    } else {
+        shape.push(code);
+        shape_other.push(code);
+    }
     scan.push(scan_index);
     state.push(top_state);
     parent.push(under);
@@ -157,9 +169,9 @@ int Parser.reduce(int head, int production, int position, int examined, bool is_
     int node = tree.add_node(lhs, production, children, node_flags, examined - node_end);
     int target = goto_state(stack.state[current], lhs);
     int scan_index = stack.scan[head];
-    int top = stack.push(target, current, node, is_extra, scan_index);
+    int top = stack.push(target, current, node, is_extra, scan_index, error_mark_of(node));
     for (int extra_node in trailing) {
-        top = stack.push(target, top, extra_node, true, scan_index);
+        top = stack.push(target, top, extra_node, true, scan_index, error_mark_of(extra_node));
         if (tree.has_flag(extra_node, GRV_tree.FLAG_ERROR)) {
             stack.dirty[top] = 1;
         }
@@ -214,10 +226,59 @@ bool Parser.should_replace(int current, int current_dyn, int candidate, int cand
     return compare_trees(current, candidate) == 1;
 }
 
+int Parser.error_mark_of(int node) {
+    if (tree.has_flag(node, GRV_tree.FLAG_ERROR) || tree.has_flag(node, GRV_tree.FLAG_HAS_ERROR)) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Two versions at the same position merge when their stacks have the same shape (same states from
+ * bottom to top, errors in the same entries) and the scanner is in the same state: what is still
+ * to be parsed cannot tell them apart, so only the better tree is kept (tree-sitter merges the
+ * stacks and keeps both trees as alternatives of one node; the result is the same tree). */
+bool Parser.can_merge(int first, int second) {
+    if (first == second) {
+        return true;
+    }
+    if (stack.state[first] != stack.state[second] || stack.shape[first] != stack.shape[second] || stack.shape_other[first] != stack.shape_other[second]) {
+        return false;
+    }
+    return stack.scan[first] == stack.scan[second] || scan_states[stack.scan[first]] == scan_states[stack.scan[second]];
+}
+
+/* A version waiting in the work list that a fresh reduction can merge with: two readings of the same
+ * text that reduce to the same symbol in the same stack shape (tree-sitter compares them in
+ * ts_parser__reduce through select_children). */
+/* Which of two merged versions to keep. The versions share the bottom of their stacks; the entries just
+ * above the shared part hold the alternative readings, and those are what the choice is about. */
+bool Parser.should_replace_head(int current, int current_dyn, int candidate, int candidate_dyn) {
+    int low_current = current;
+    int low_candidate = candidate;
+    int walk_current = current;
+    int walk_candidate = candidate;
+    while (walk_current != walk_candidate && walk_current >= 0 && walk_candidate >= 0) {
+        low_current = walk_current;
+        low_candidate = walk_candidate;
+        walk_current = stack.parent[walk_current];
+        walk_candidate = stack.parent[walk_candidate];
+    }
+    return should_replace(stack.node[low_current], current_dyn, stack.node[low_candidate], candidate_dyn);
+}
+
+int Parser.find_twin(int top, int position, int index) {
+    for (int other in index + 1 .. work_head.size()) {
+        if (work_position[other] == position && can_merge(work_head[other], top)) {
+            return other;
+        }
+    }
+    return -1;
+}
+
 void Parser.queue_next(int head, int position, int dyn) {
     for (int index in 0 .. next_head.size()) {
-        if (stack.state[next_head[index]] == stack.state[head] && stack.parent[next_head[index]] == stack.parent[head] && next_position[index] == position) {
-            if (should_replace(stack.node[next_head[index]], next_dyn[index], stack.node[head], dyn)) {
+        if (can_merge(next_head[index], head) && next_position[index] == position) {
+            if (should_replace_head(next_head[index], next_dyn[index], head, dyn)) {
                 next_head[index] = head;
                 next_dyn[index] = dyn;
             }
@@ -259,7 +320,13 @@ int Parser.accept(int head) {
         children.push(node);
     }
     int root = tree.add_node(tree.node_symbol[top_node], tree.production[top_node], children, 0, 0);
-    tree.size[root] = text.size() - tree.padding[root];
+    if (children.size() == 0) {
+        // a text that is only blank: tree-sitter makes the blank the padding of the empty root
+        tree.padding[root] = text.size();
+        tree.size[root] = 0;
+    } else {
+        tree.size[root] = text.size() - tree.padding[root];
+    }
     return root;
 }
 
@@ -317,7 +384,7 @@ void Parser.process(int index) {
     if (actions_end == found) {
         if (term > 0 && lang.has_flag(term, GRV_lang.F_EXTRA)) {
             int leaf = tree.add_token(term, start - position, stop - start, examined - stop, GRV_tree.FLAG_EXTRA);
-            queue_next(stack.push(state, head, leaf, true, stack.scan[head]), stop, dyn);
+            queue_next(stack.push(state, head, leaf, true, stack.scan[head], 0), stop, dyn);
         } else {
             note_dead(head, position, term, start, stop, examined);
         }
@@ -340,15 +407,22 @@ void Parser.process(int index) {
         int argument = action / 4;
         if (kind == GRV_lr.SHIFT) {
             int leaf = tree.add_token(term, start - position, stop - start, examined - stop, leaf_flags);
-            queue_next(stack.push(argument, head, leaf, false, shift_scan), stop, dyn);
+            queue_next(stack.push(argument, head, leaf, false, shift_scan, 0), stop, dyn);
             if (stop > furthest) {
                 furthest = stop;
             }
         } else if (kind == GRV_lr.REDUCE) {
             int top = reduce(head, argument, position, examined, is_fragile);
-            work_head.push(top);
-            work_position.push(position);
-            work_dyn.push(dyn + lang.prod_dyn[argument]);
+            int reduced_dyn = dyn + lang.prod_dyn[argument];
+            int twin = find_twin(top, position, index);
+            if (twin < 0) {
+                work_head.push(top);
+                work_position.push(position);
+                work_dyn.push(reduced_dyn);
+            } else if (should_replace_head(work_head[twin], work_dyn[twin], top, reduced_dyn)) {
+                work_head[twin] = top;
+                work_dyn[twin] = reduced_dyn;
+            }
         } else if (kind == GRV_lr.ACCEPT) {
             int root = accept(head);
             if (done_head < 0 || should_replace(done_head, done_dyn, root, dyn)) {
@@ -516,7 +590,7 @@ void Parser.try_reuse() {
         if (symbol >= table.lang.term_count) {
             target = goto_state(state, symbol);
         }
-        head = stack.push(target, head, node, is_extra, stack.scan[head]);
+        head = stack.push(target, head, node, is_extra, stack.scan[head], error_mark_of(node));
         position = position + tree.total(node);
         if (is_tracing) {
             trace.push("reuse symbol " + str(symbol) + " at " + str(position) + " total " + str(tree.total(node)) + " state " + str(state) + " -> " + str(target) + " flags " + str(tree.flags[node]));
@@ -532,7 +606,7 @@ void Parser.try_reuse() {
 // wrap `children` in an ERROR node (an extra) and push it on `under`
 int Parser.push_error(int under, List<int> children, int under_state) {
     int node = tree.add_node(table.lang.error_symbol, -1, children, GRV_tree.FLAG_EXTRA + GRV_tree.FLAG_ERROR, 0);
-    int entry = stack.push(under_state, under, node, true, stack.scan[under]);
+    int entry = stack.push(under_state, under, node, true, stack.scan[under], 1);
     stack.dirty[entry] = 1;
     return entry;
 }
@@ -673,7 +747,7 @@ pub Parser begin(GRV_lexer.Lexer lexer, str source, Option<GRV_tree.Tree> old) {
         parser.cursor_index.push(0);
     }
     parser.scan_states.push([]);
-    int base = parser.stack.push(0, -1, -1, false, 0);
+    int base = parser.stack.push(0, -1, -1, false, 0, 0);
     parser.next_head.push(base);
     parser.next_position.push(0);
     parser.next_dyn.push(0);
