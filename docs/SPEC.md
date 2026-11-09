@@ -1676,3 +1676,73 @@ for the tables, 30 ticks, `highlights` of 60 rows 1.8 ms, reparse after an edit 
 Convert the four types; call `did_tick` from its loop with a small budget and redraw when it returns true;
 compare `version` with the one it drew with; set `cache_directory`; decide where the grammar and query texts
 come from (`add_language`). The 5 MB and 10 000-byte line limits of `MED_ts.is_large` stay on m3's side.
+
+## 21. The tick budget, and objects, folds, indent, injections (version 0.8.0)
+
+### 21.1 The 8 ms tick
+
+0.7.0 measured one tick of 8 ms against a budget of 1 ms on a 1.2 MB JSON document. Timing every parser
+round found it: the slow rounds happen at arena sizes of exactly 65 537, 131 075, 262 146 nodes, the points
+where the lists of the tree and of the stack double. A `List` grows by `realloc`, and glibc, once it has
+freed a large mapped block, raises its mmap threshold and serves large blocks from the heap, where `realloc`
+copies and touches every page: ten tree lists and eight stack lists at once, 4 ms at 130 000 nodes, 8 to
+12 ms at 260 000, growing with the document. Not the lexer (a second document with a warm lexer is as slow),
+not the parser (a round handles at most 5 work items), not the balanced repeats.
+
+What was done:
+
+- The stack arena is rebuilt from the live versions when it passes four times its size after the last
+  rebuild (`Parser.compact_stack`): a flat list reduces its elements away and leaves almost all of the arena
+  behind (440 002 rounds on a 20 000-record document leave a stack of 3 622 entries instead of 440 000). That
+  removes eight of the eighteen growing lists and memory with them.
+- A way of making the tree lists double ahead of time, one list per call (`grow_ahead`), was written, measured
+  and removed: the dummy pushes touch as much memory as the doubling, and the total time went up.
+- What remains is outside grove: **with `MALLOC_MMAP_THRESHOLD_=65536` in the environment the slowest tick of
+  the same run is 1.3 ms instead of 12 ms**, because large blocks stay mapped and grow by `mremap` without
+  a copy. The fix is one `mallopt(M_MMAP_THRESHOLD, 65536)` at start-up in m31's runtime (`rt.c`, which has no
+  `mallopt` today) or the variable in m3's launcher; a pure-m31 program cannot set it. Chunked arenas would
+  remove the dependency at a cost on every node access (about 60 sites, and a reference-count operation more
+  per access); not done.
+- Tested by work units, not time (`tests/t_work.m31`): on a 20 000-record document no round handles more than
+  64 work items (it is 5), the stack arena was rebuilt and stays under 20 000 entries, and a budget of 0 takes
+  one batch of 8 rounds per call.
+
+Compaction of the tree is now sliced: `Tree.begin_compact` returns a `Compactor` that copies 256 nodes per
+step (an explicit stack, post-order), `GRV_med` steps it while the tick budget lasts, after parsing, and an
+edit throws a half-made copy away. (Its fresh lists still double, so the mmap threshold applies to it too.)
+
+### 21.2 The query files
+
+Vendored with attribution in `tests/data/queries/NOTICE.md`: `textobjects` (c, lua; nvim-treesitter-textobjects
+5ca4aaa), `folds`, `indents`, `injections` (nvim-treesitter cf12346; json has folds and indents only). What the
+engine needed to run them:
+
+- **supertypes**: `(statement)` matches a node that sits under a hidden `statement` node of the parse tree,
+  not any node of a member type (so Lua's `function_call` as an argument is not a `statement`). Views carry the
+  supertypes of the hidden nodes they were reached through.
+- `#make-range! "name" @start @end` makes a capture `name` from the start of the first to the end of the last;
+  `#kind-eq?` / `#not-kind-eq?`; anchors inside a parenthesized group of siblings (`((a) . (b))`); a dot inside
+  a name (`injection.language`, which the tokenizer split into three, losing every `#set!` property with a dot).
+- Captures carry the tree node and the match they came from, for indent and injections.
+
+### 21.3 Against nvim
+
+Same method as highlights: nvim 0.11.5, compiled parsers of the grammar revision, sets of
+`name start end`. Committed fixtures (`tests/t_query_oracle.m31`): highlights 45, textobjects 37, folds 45,
+injections 37 files, **all identical**. Real files (`tests/oracle/report_captures.sh`; `experiments/results/
+query_kinds.txt`): see that file for the counts. One known divergence: a Lua `if` with many `elseif` in
+`keyboard.lua` gets the conditional text objects of its last `elseif` from grove and not from nvim; tree-sitter
+drops matches when a query has more in-progress matches than its limit (64), which grove does not model.
+
+### 21.4 `GRV_med`: objects, folds, indent, injections
+
+`Backend.add_queries(language, kind, text)` adds a query file (kinds as above) before the language is first
+used. `objects(document, kind, row, col)`: the captures named `kind` (including `#make-range!` ranges) that
+contain the position, innermost first. `folds(document)`: `@fold` captures that span more than one row, once
+each. `injections(document)`: `@injection.content` ranges with the language from `#set! injection.language` or an
+`@injection.language` capture of the same match, `#offset!` applied; the editor parses them as separate trees
+(not done here). `indent(document, row)`: nvim-treesitter's `indent.lua` ported without `indent.align`
+(`@indent.begin/end/dedent/branch/ignore/zero/auto`, `indent.immediate`, `indent.start_at_same_line`), with
+`Backend.shiftwidth` (default 4); -1 for "no opinion". `tests/t_med_oracle.m31` compares it line by line with
+nvim-treesitter's `get_indent` on the 45 fixtures (241 lines): all agree. Lines that depend on `indent.align`
+(aligned parameter lists in C) are the known gap and are not in the fixtures.

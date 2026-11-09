@@ -1,0 +1,14 @@
+grove vs nvim 0.11.5 captures for the query kinds of 0.8.0 (vendored files in tests/data/queries; compiled parsers of the grammar's revision; up to 150-300 files <= 60 KB chosen by a hash of the path; sets of "name start end")
+highlights lua:    300 identical, 0 different
+highlights c:      109 identical, 0 different, 191 skipped (nvim cannot query, or tree has errors)
+highlights json:   284 identical, 0 different, 16 skipped
+textobjects c:      76 identical, 0 different, 124 skipped
+textobjects lua:   198 identical, 2 different (keyboard.lua: conditional.inner after many elseif; nvim's query match limit)
+folds c:            76 identical, 0 different, 124 skipped
+folds lua:         200 identical, 0 different
+folds json:        140 identical, 0 different, 10 skipped
+indents c:          76 identical, 0 different, 124 skipped   (captures; the indentation itself is checked line by line in t_med_oracle)
+indents lua:       150 identical (earlier run), indents json 95 identical
+injections c:       76 identical, 0 different, 124 skipped
+injections lua:    200 identical, 0 different
+Tick budget (tests/medbench.m31, JSON 1.2 MB, budget 1000 us): slowest tick 9.8 ms and 11.6 ms (two documents) as is; 1.26 ms and 1.27 ms with MALLOC_MMAP_THRESHOLD_=65536.

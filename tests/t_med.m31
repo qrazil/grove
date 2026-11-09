@@ -125,4 +125,24 @@ check.ok("and is no longer offered", !backend.has_language("broken"));
 check.eq_int("version stays 0", backend.version(4), 0);
 backend.parse(5, "unregistered", ["x"]);
 check.ok("an unregistered language reports no change", !backend.did_tick(1000));
+// compaction is sliced and keeps the answers: many edits grow the arena, a small floor makes it compact
+GRV_med.Backend small = GRV_med.Backend();
+small.compact_floor = 0;
+small.add_language("json", read_or_empty("tests/data/json/grammar.json"), query_text);
+List<str> base = ["{\"a\": [1, true],", " \"b\": 22}"];
+small.parse(1, "json", base);
+small.did_tick(1000000);
+str before = show(small.highlights(1, 0, 1));
+List<str> current = base.slice(0, base.size());
+for (int round in 0 .. 60) {
+    str digit = str(round % 10);
+    List<str> next = current.slice(0, current.size());
+    next[1] = " \"b\": 2" + digit + "}";
+    small.edit(1, GRV_med.Edit(1, 6, 1, current[1].size() - 1, 1, next[1].size() - 1), next);
+    current = next;
+    small.did_tick(1000000);
+}
+check.ok("the arena was compacted", small.compactions > 0);
+check.eq_int("version moved once per parse", small.version(1), 61);
+check.eq_str("answers survive compaction", show(small.highlights(1, 0, 1)), before.split("number@1:6-1:8").join("number@1:6-1:8"));
 check.finish();

@@ -29,7 +29,7 @@ import os;
 import timer;
 
 /// the version of grove whose tables a file holds; tests check it against `deps`
-pub const str GROVE_VERSION = "0.7.0";
+pub const str GROVE_VERSION = "0.8.0";
 const int FORMAT = 1;
 const int MODULUS = 1000000007;
 

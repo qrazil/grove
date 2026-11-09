@@ -1,0 +1,21 @@
+@@ c tests/oracle/fixtures/c/hello.c
+function.outer 2 0 5 1
+parameter.inner 2 9 2 17
+parameter.inner 2 19 2 30
+block.outer 2 32 5 1
+call.outer 3 4 3 55
+statement.outer 3 4 3 56
+parameter.inner 3 11 3 24
+parameter.inner 3 26 3 54
+number.inner 3 33 3 34
+number.inner 3 42 3 43
+return.outer 4 4 4 13
+statement.outer 4 4 4 13
+return.inner 4 11 4 12
+number.inner 4 11 4 12
+parameter.outer 2 9 2 18
+parameter.outer 2 17 2 30
+parameter.outer 3 11 3 25
+parameter.outer 3 24 3 54
+call.inner 3 11 3 54
+function.inner 3 4 4 13

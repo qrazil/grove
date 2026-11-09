@@ -1,0 +1,10 @@
+@@ lua tests/oracle/fixtures/lua/hello.lua
+assignment.outer 0 0 0 20
+statement.outer 0 0 0 20
+assignment.lhs 0 6 0 10
+assignment.inner 0 6 0 10
+assignment.inner 0 13 0 20
+assignment.rhs 0 13 0 20
+call.outer 1 0 1 31
+statement.outer 1 0 1 31
+parameter.inner 1 6 1 30

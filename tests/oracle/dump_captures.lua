@@ -17,6 +17,29 @@ local function read(path)
   return text
 end
 
+-- the two custom handlers nvim-treesitter(-textobjects) add and the queries use
+local function first_node(match, id)
+  local node = match[id]
+  if type(node) == "table" then node = node[#node] end
+  return node
+end
+vim.treesitter.query.add_predicate("kind-eq?", function(match, _, _, pred)
+  local node = first_node(match, pred[2])
+  if not node then return true end
+  for i = 3, #pred do if pred[i] == node:type() then return true end end
+  return false
+end, { force = true, all = true })
+vim.treesitter.query.add_directive("make-range!", function(match, _, _, pred, metadata)
+  local nodes_start, nodes_end = match[pred[3]], match[pred[4]]
+  if type(nodes_start) == "table" then nodes_start = nodes_start[1] end
+  if type(nodes_end) == "table" then nodes_end = nodes_end[#nodes_end] end
+  if not (nodes_start and nodes_end) then return end
+  local sr, sc = nodes_start:start()
+  local er, ec = nodes_end:end_()
+  metadata.made = metadata.made or {}
+  metadata.made[#metadata.made + 1] = { pred[2], sr, sc, er, ec }
+end, { force = true })
+
 for line in io.lines(manifest) do
   local lang, query_file, path = line:match("^([^\t]+)\t([^\t]+)\t(.+)$")
   if lang then
@@ -35,6 +58,11 @@ for line in io.lines(manifest) do
           local range = (meta and meta.range) or (meta and meta[id] and meta[id].range)
           if range then srow, scol, erow, ecol = range[1], range[2], range[3], range[4] end
           out:write(string.format("%s %d %d %d %d\n", name, srow, scol, erow, ecol))
+        end
+      end
+      for _, match, metadata in query:iter_matches(root, text, 0, -1, { all = true }) do
+        for _, m in ipairs((metadata and metadata.made) or {}) do
+          out:write(string.format("%s %d %d %d %d\n", m[1], m[2], m[3], m[4], m[5]))
         end
       end
     end)

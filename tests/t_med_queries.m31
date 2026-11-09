@@ -1,0 +1,71 @@
+/* GRV_med: objects, folds, injections and indent, on small Lua and C sources with the vendored query
+ * files. The queries themselves are checked against nvim in t_query_oracle and t_med_oracle. */
+
+import core.GRV_med;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+str show(List<GRV_med.Range> ranges) {
+    List<str> parts = [];
+    for (GRV_med.Range range in ranges) {
+        parts.push(str(range.start_row) + ":" + str(range.start_col) + "-" + str(range.end_row) + ":" + str(range.end_col));
+    }
+    return parts.join(" ");
+}
+
+GRV_med.Backend backend = GRV_med.Backend();
+List<str> languages = ["lua", "c"];
+List<str> kinds = ["textobjects", "folds", "indents", "injections"];
+for (str language in languages) {
+    backend.add_language(language, read_or_empty("tests/data/" + language + "/grammar.json"), read_or_empty("tests/data/queries/" + language + ".scm"));
+    for (str kind in kinds) {
+        backend.add_queries(language, kind, read_or_empty("tests/data/queries/" + kind + "/" + language + ".scm"));
+    }
+}
+List<str> lua = ["local function f(a, b)", "  if a then", "    return a + b", "  end", "end", "-- a comment", "local t = { 1, 2 }"];
+backend.parse(1, "lua", lua);
+check.eq_str("objects before the first tick", show(backend.objects(1, "function.outer", 2, 4)), "");
+check.eq_int("indent before the first tick", backend.indent(1, 2), -1);
+while (backend.version(1) < 1) {
+    backend.did_tick(1000000);
+}
+check.eq_str("function.outer around a position", show(backend.objects(1, "function.outer", 2, 6)), "0:0-4:3");
+check.eq_str("function.inner", show(backend.objects(1, "function.inner", 2, 6)), "1:2-3:5");
+check.eq_str("conditional.outer", show(backend.objects(1, "conditional.outer", 2, 6)), "1:2-3:5");
+check.eq_str("innermost first", show(backend.objects(1, "statement.outer", 2, 6)), "2:4-2:16 1:2-3:5 0:0-4:3");
+check.eq_str("nothing of a kind that is not there", show(backend.objects(1, "class.outer", 2, 6)), "");
+check.eq_str("folds", show(backend.folds(1)), "0:0-4:3 1:2-3:5");
+check.eq_int("indent inside the if", backend.indent(1, 2), 8);
+check.eq_int("indent of end", backend.indent(1, 3), 4);
+check.eq_int("indent at the top", backend.indent(1, 5), 0);
+check.eq_int("indent in a function body line", backend.indent(1, 1), 4);
+List<str> c_lines = ["int main(void)", "{", "    if (x) {", "        f();", "    }", "    return 0;", "}"];
+backend.parse(2, "c", c_lines);
+while (backend.version(2) < 1) {
+    backend.did_tick(1000000);
+}
+check.eq_str("c function.outer", show(backend.objects(2, "function.outer", 3, 9)), "0:0-6:1");
+check.eq_str("c folds", show(backend.folds(2)), "0:0-6:1 2:4-4:5");
+check.eq_int("c indent in the block", backend.indent(2, 3), 8);
+check.eq_int("c indent of the closing brace", backend.indent(2, 4), 4);
+check.eq_int("c indent of the first line", backend.indent(2, 0), 0);
+// injections: a comment is injected with the comment parser when the query says so
+List<GRV_med.Injection> injected = backend.injections(1);
+check.ok("lua injections list the comment", injected.size() >= 1);
+if (injected.size() >= 1) {
+    check.eq_str("the language of a lua comment injection", injected[0].language, "comment");
+}
+check.finish();

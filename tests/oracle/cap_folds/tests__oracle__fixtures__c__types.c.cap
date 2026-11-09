@@ -1,0 +1,7 @@
+@@ c tests/oracle/fixtures/c/types.c
+fold 0 0 0 25
+fold 2 0 2 26
+fold 4 0 4 35
+fold 5 29 5 46
+fold 8 0 8 12
+fold 8 22 8 40

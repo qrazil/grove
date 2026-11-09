@@ -92,49 +92,63 @@ List<str> dump_lines(str dump) {
 }
 
 Map<str, GRV_lexer.Lexer> lexers = {};
-Map<str, GRV_query.Query> queries = {};
-for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
-    List<str> columns = row.split("\t");
-    if (row.starts_with("#") || columns.size() < 2) {
-        continue;
-    }
-    str language = columns[0];
-    str path = columns[1];
-    if (!lexers.contains(language)) {
-        match (GRV_grammar.load(read_or_empty("tests/data/" + language + "/grammar.json"))) {
-            case Err(str reason): {
-                check.ok("grammar for " + language, false);
-                continue;
-            }
-            case Ok(GRV_grammar.Grammar grammar): {
-                lexers.set(language, GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar))));
-                GRV_query.Query loaded = GRV_query.parse(read_or_empty("tests/data/queries/" + language + ".scm"));
-                check.ok("queries for " + language + " load: " + loaded.error_text, !loaded.is_failed);
-                queries.set(language, loaded);
-            }
-        }
-    }
-    match (lexers.get(language)) {
-        case None: {
+
+/// grove's captures against nvim's for every fixture that has a query file in `query_directory`
+void compare_kind(GRV_check.Check check, Map<str, GRV_lexer.Lexer> lexers, str kind, str query_directory, str cap_directory) {
+    Map<str, GRV_query.Query> queries = {};
+    for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
+        List<str> columns = row.split("\t");
+        if (row.starts_with("#") || columns.size() < 2) {
             continue;
         }
-        case Some(GRV_lexer.Lexer lexer): {
-            match (queries.get(language)) {
-                case None: {
+        str language = columns[0];
+        str path = columns[1];
+        if (read_or_empty(query_directory + language + ".scm") == "") {
+            continue;
+        }
+        if (!lexers.contains(language)) {
+            match (GRV_grammar.load(read_or_empty("tests/data/" + language + "/grammar.json"))) {
+                case Err(str reason): {
+                    check.ok("grammar for " + language, false);
                     continue;
                 }
-                case Some(GRV_query.Query query): {
-                    str source = read_or_empty(path);
-                    GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
-                    str dump = read_or_empty("tests/oracle/cap/" + path.split("/").join("__") + ".cap");
-                    if (tree.has_errors()) {
-                        check.ok(path + ": the tree has errors", false);
-                    } else {
-                        check.eq_str(path, grove_lines(query, tree, source).join("\n"), dump_lines(dump).join("\n"));
+                case Ok(GRV_grammar.Grammar grammar): {
+                    lexers.set(language, GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar))));
+                }
+            }
+        }
+        if (!queries.contains(language)) {
+            GRV_query.Query loaded = GRV_query.parse(read_or_empty(query_directory + language + ".scm"));
+            check.ok(kind + " queries for " + language + " load: " + loaded.error_text, !loaded.is_failed);
+            queries.set(language, loaded);
+        }
+        match (lexers.get(language)) {
+            case None: {
+                continue;
+            }
+            case Some(GRV_lexer.Lexer lexer): {
+                match (queries.get(language)) {
+                    case None: {
+                        continue;
+                    }
+                    case Some(GRV_query.Query query): {
+                        str source = read_or_empty(path);
+                        GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
+                        str dump = read_or_empty(cap_directory + path.split("/").join("__") + ".cap");
+                        if (tree.has_errors()) {
+                            check.ok(path + ": the tree has errors", false);
+                        } else {
+                            check.eq_str(kind + " " + path, grove_lines(query, tree, source).join("\n"), dump_lines(dump).join("\n"));
+                        }
                     }
                 }
             }
         }
     }
 }
+
+compare_kind(check, lexers, "highlights", "tests/data/queries/", "tests/oracle/cap/");
+compare_kind(check, lexers, "textobjects", "tests/data/queries/textobjects/", "tests/oracle/cap_textobjects/");
+compare_kind(check, lexers, "folds", "tests/data/queries/folds/", "tests/oracle/cap_folds/");
+compare_kind(check, lexers, "injections", "tests/data/queries/injections/", "tests/oracle/cap_injections/");
 check.finish();

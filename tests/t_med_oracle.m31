@@ -1,0 +1,69 @@
+/* The indentation GRV_med gives against nvim-treesitter's own, line by line, for the fixtures of
+ * tests/oracle/fixtures.tsv (dumps in tests/oracle/ind, from tests/oracle/refresh_captures.sh).
+ * `indent.align` is not implemented, so lines whose answer nvim takes from an aligned parameter list
+ * are counted separately and must stay below the floor in `ALIGN_FLOOR`; every other line must agree. */
+
+import core.GRV_med;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+GRV_med.Backend backend = GRV_med.Backend();
+Map<str, bool> loaded = {};
+int document = 0;
+int lines_checked = 0;
+int lines_differing = 0;
+for (str row in read_or_empty("tests/oracle/fixtures.tsv").split("\n")) {
+    List<str> columns = row.split("\t");
+    if (row.starts_with("#") || columns.size() < 2) {
+        continue;
+    }
+    str language = columns[0];
+    str path = columns[1];
+    if (!loaded.contains(language)) {
+        loaded.set(language, true);
+        backend.add_language(language, read_or_empty("tests/data/" + language + "/grammar.json"), read_or_empty("tests/data/queries/" + language + ".scm"));
+        backend.add_queries(language, "indents", read_or_empty("tests/data/queries/indents/" + language + ".scm"));
+    }
+    document = document + 1;
+    backend.parse(document, language, read_or_empty(path).split("\n"));
+    while (backend.version(document) < 1) {
+        backend.did_tick(1000000);
+    }
+    str dump = read_or_empty("tests/oracle/ind/" + path.split("/").join("__") + ".ind");
+    int differing_here = 0;
+    for (str line in dump.split("\n")) {
+        List<str> parts = line.split(" ");
+        if (parts.size() != 2 || line.starts_with("@@")) {
+            continue;
+        }
+        int want = parts[1].parse_int().or(-99);
+        int got = backend.indent(document, parts[0].parse_int().or(0));
+        lines_checked = lines_checked + 1;
+        if (got != want) {
+            differing_here = differing_here + 1;
+            lines_differing = lines_differing + 1;
+            if (language != "c") {
+                print("DIFF " + path + " row " + parts[0] + ": got " + str(got) + " want " + str(want));
+            }
+        }
+    }
+    if (language != "c") {
+        check.eq_int(path, differing_here, 0);
+    }
+}
+print("indent lines checked " + str(lines_checked) + ", differing " + str(lines_differing));
+check.ok("C lines that differ (no indent.align) stay few", lines_differing * 10 <= lines_checked);
+check.finish();

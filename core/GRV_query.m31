@@ -25,6 +25,7 @@
  * Comparison with nvim's own captures for json, c and lua: docs/SPEC.md section 18. */
 
 import core.GRV_find;
+import core.GRV_grammar;
 import core.GRV_lang;
 import core.GRV_tree;
 
@@ -60,6 +61,9 @@ pub type Found {
     pub int start;
     pub int stop;
     pub int pattern;
+    /// the tree node it is the range of (-1 for a `#make-range!` range), and the match it came from (captures of one match share it)
+    pub int node = -1;
+    pub int match_id = 0;
     /// rows, columns, rows, columns to add to the start and the end (from `#offset!`), or empty
     pub List<int> offset = [];
 }
@@ -81,6 +85,8 @@ pub type Query {
     pub str error_text = "";
     pub int pattern_count = 0;
     pub List<Map<str, str>> properties = [];
+    /// per pattern: its `#make-range! "name" @start @end` directives, each as [name, start capture, end capture]
+    List<List<List<str>>> pattern_ranges = [];
     List<str> token_text = [];
     List<int> token_kind = [];
     List<int> token_at = [];
@@ -213,7 +219,8 @@ void Query.tokenize(str source) {
             index = index + 1;
         } else if (is_name_char(code)) {
             int from = index;
-            while (index < size && is_name_char(source.byte_at(index))) {
+            /* a dot between name characters belongs to the name (`injection.language`, `@indent.begin`) */
+            while (index < size && (is_name_char(source.byte_at(index)) || (source.byte_at(index) == 46 && index + 1 < size && is_name_char(source.byte_at(index + 1)) && index > from))) {
                 index = index + 1;
             }
             if (index < size && source.byte_at(index) == 58) {
@@ -376,6 +383,10 @@ void Query.parse_predicate(int pattern) {
             }
             properties[pattern].set(arguments[0], value);
         }
+    } else if (name == "make-range!") {
+        if (arguments.size() == 3) {
+            pattern_ranges[pattern].push(arguments);
+        }
     } else if (name == "offset!") {
         if (arguments.size() == 5 && kinds[0] == 0) {
             pattern_offsets[pattern] = [capture_id(arguments[0]), arguments[1].parse_int().or(0), arguments[2].parse_int().or(0), arguments[3].parse_int().or(0), arguments[4].parse_int().or(0)];
@@ -399,12 +410,16 @@ int Query.parse_pattern(int pattern) {
         int next = peek();
         if (next == T_OPEN || next == T_BRACKET_OPEN || next == T_STRING) {
             node = new_node(K_GROUP, "");
+            int group_anchor = 0;
             while (!is_failed && peek() != T_CLOSE) {
                 if (peek() < 0) {
                     fail(0, "missing )");
                     return node;
                 }
-                if (peek() == T_OPEN && peek_at(1) == T_PREDICATE) {
+                if (peek() == T_DOT) {
+                    cursor = cursor + 1;
+                    group_anchor = 1;
+                } else if (peek() == T_OPEN && peek_at(1) == T_PREDICATE) {
                     parse_predicate(pattern);
                 } else {
                     int child = parse_pattern(pattern);
@@ -412,7 +427,8 @@ int Query.parse_pattern(int pattern) {
                         return node;
                     }
                     int quantifier = parse_suffix(child);
-                    node_items[node].push(new_item(child, "", quantifier, 0));
+                    node_items[node].push(new_item(child, "", quantifier, group_anchor));
+                    group_anchor = 0;
                 }
             }
             cursor = cursor + 1;
@@ -554,6 +570,7 @@ pub Query parse(str source) {
         int pattern = query.pattern_root.size();
         query.pattern_root.push(-1);
         query.pattern_predicates.push([]);
+        query.pattern_ranges.push([]);
         query.pattern_offsets.push([]);
         Map<str, str> own = {};
         query.properties.push(own);
@@ -579,6 +596,8 @@ type View {
     int stop;
     int alias;
     int field;
+    /// the supertypes (named in the query) whose hidden nodes this one sits under
+    List<str> supers;
 }
 
 /// A capture inside a match: the capture id, the range and the type names of the ancestors.
@@ -587,6 +606,8 @@ type Cap {
     int start;
     int stop;
     List<str> ancestors;
+    str type_name;
+    int node;
 }
 
 type Run {
@@ -595,8 +616,29 @@ type Run {
     GRV_lang.Lang lang;
     str text;
     List<Found> found = [];
+    int matches = 0;
+    // returned by every match that fails; nobody changes a list it gets back
+    List<List<Cap>> no_bindings = [];
+    List<str> no_supers = [];
     // the visible children of a node, kept for the length of one run: many patterns ask for the same node
     Map<int, List<View>> kid_cache = {};
+    // the supertypes the query names
+    Map<str, bool> super_names = {};
+}
+
+// whether a visible node is what the pattern's `wanted` names: its own type, or a supertype it sits under
+bool Run.is_type(str wanted, str actual, List<str> supers) {
+    return wanted == actual || supers.contains(wanted);
+}
+
+// the supertypes the query names (only those matter to the views)
+void Run.find_supertypes() {
+    GRV_grammar.Grammar grammar = lang.grammar;
+    for (int rule in grammar.supertypes) {
+        if (query.by_type.contains(grammar.rule_name[rule])) {
+            super_names.set(grammar.rule_name[rule], true);
+        }
+    }
 }
 
 str Run.type_of(View view) {
@@ -614,7 +656,7 @@ bool Run.is_named(View view) {
 }
 
 // the visible children of `parent`, hidden nodes replaced by theirs
-void Run.collect(int parent, int parent_start, int inherited, List<View> out, int from, int last) {
+void Run.collect(int parent, int parent_start, int inherited, List<str> inherited_supers, List<View> out, int from, int last) {
     int production_id = tree.production[parent];
     int child_number = 0;
     int cursor = parent_start;
@@ -647,9 +689,14 @@ void Run.collect(int parent, int parent_start, int inherited, List<View> out, in
             is_visible = true;
         }
         if (is_visible) {
-            out.push(View(kid, kid_start, kid_start + tree.size[kid], alias, use_field));
+            out.push(View(kid, kid_start, kid_start + tree.size[kid], alias, use_field, inherited_supers));
         } else {
-            collect(kid, kid_start, use_field, out, from, last);
+            List<str> nested = inherited_supers;
+            if (super_names.size() > 0 && super_names.contains(lang.symbol_name[tree.node_symbol[kid]])) {
+                nested = inherited_supers.slice(0, inherited_supers.size());
+                nested.push(lang.symbol_name[tree.node_symbol[kid]]);
+            }
+            collect(kid, kid_start, use_field, nested, out, from, last);
         }
     }
 }
@@ -663,7 +710,7 @@ List<View> Run.kids_of(View view) {
         }
     }
     List<View> out = [];
-    collect(view.node, view.start, -1, out, 0, 9223372036854775807);
+    collect(view.node, view.start, -1, no_supers, out, 0, 9223372036854775807);
     kid_cache.set(view.node, out);
     return out;
 }
@@ -671,16 +718,16 @@ List<View> Run.kids_of(View view) {
 // only the children that meet the byte range [from, last]
 List<View> Run.kids_in(View view, int from, int last) {
     List<View> out = [];
-    collect(view.node, view.start, -1, out, from, last);
+    collect(view.node, view.start, -1, no_supers, out, from, last);
     return out;
 }
 
 List<List<Cap>> Run.match_node(int pattern_node, View view, List<str> ancestors) {
-    List<List<Cap>> none = [];
+    List<List<Cap>> none = no_bindings;
     int kind = query.node_kind[pattern_node];
     str type_name = type_of(view);
     if (kind == K_NAMED) {
-        if (!is_named(view) || type_name != query.node_name[pattern_node]) {
+        if (!is_named(view) || !is_type(query.node_name[pattern_node], type_name, view.supers)) {
             return none;
         }
     } else if (kind == K_ANON) {
@@ -700,7 +747,7 @@ List<List<Cap>> Run.match_node(int pattern_node, View view, List<str> ancestors)
         for (int item in query.node_items[pattern_node]) {
             int alternative = query.item_node[item];
             int alternative_kind = query.node_kind[alternative];
-            if ((alternative_kind == K_NAMED || alternative_kind == K_ANON) && query.node_name[alternative] != type_name) {
+            if ((alternative_kind == K_NAMED || alternative_kind == K_ANON) && !is_type(query.node_name[alternative], type_name, view.supers)) {
                 continue;
             }
             for (List<Cap> binding in match_node(alternative, view, ancestors)) {
@@ -749,7 +796,7 @@ List<List<Cap>> Run.with_captures(int pattern_node, View view, List<str> ancesto
     for (List<Cap> binding in bindings) {
         List<Cap> grown = clone_caps(binding);
         for (int capture in captures) {
-            grown.push(Cap(capture, view.start, view.stop, ancestors));
+            grown.push(Cap(capture, view.start, view.stop, ancestors, type_of(view), view.node));
         }
         out.push(grown);
     }
@@ -790,7 +837,7 @@ List<List<Cap>> Run.sequence(int pattern_node, int item_number, List<View> kids,
         }
         int wanted = query.item_node[item];
         int wanted_kind = query.node_kind[wanted];
-        if ((wanted_kind == K_NAMED || wanted_kind == K_ANON) && (is_named(kid) != (wanted_kind == K_NAMED) || type_of(kid) != query.node_name[wanted])) {
+        if ((wanted_kind == K_NAMED || wanted_kind == K_ANON) && (is_named(kid) != (wanted_kind == K_NAMED) || !is_type(query.node_name[wanted], type_of(kid), kid.supers))) {
             continue;
         }
         for (List<Cap> sub in match_node(wanted, kid, ancestors)) {
@@ -915,6 +962,22 @@ bool Run.is_predicate_true(int predicate, List<Cap> binding) {
                 is_true = false;
             }
         }
+    } else if (base == "kind-eq?" && arguments.size() >= 2) {
+        is_true = true;
+        for (Cap cap in binding) {
+            if (cap.capture != capture) {
+                continue;
+            }
+            bool is_listed = false;
+            for (int index in 1 .. arguments.size()) {
+                if (arguments[index] == cap.type_name) {
+                    is_listed = true;
+                }
+            }
+            if (!is_listed) {
+                is_true = false;
+            }
+        }
     } else if ((base == "has-ancestor?" || base == "has-parent?") && arguments.size() >= 2) {
         is_true = false;
         for (Cap cap in binding) {
@@ -951,9 +1014,31 @@ void Run.emit(int pattern, List<Cap> binding) {
             return;
         }
     }
+    matches = matches + 1;
+    for (List<str> made in query.pattern_ranges[pattern]) {
+        int first = query.capture_names.index_of(made[1]).or(-1);
+        int last = query.capture_names.index_of(made[2]).or(-1);
+        int from = -1;
+        int made_stop = -1;
+        for (Cap cap in binding) {
+            if (cap.capture == first && from < 0) {
+                from = cap.start;
+            }
+            if (cap.capture == last) {
+                made_stop = cap.stop;
+            }
+        }
+        if (from >= 0 && made_stop >= 0) {
+            Found range = Found(made[0], from, made_stop, pattern);
+            range.match_id = matches;
+            found.push(range);
+        }
+    }
     List<int> offsets = query.pattern_offsets[pattern];
     for (Cap cap in binding) {
         Found one = Found(query.capture_names[cap.capture], cap.start, cap.stop, pattern);
+        one.node = cap.node;
+        one.match_id = matches;
         if (offsets.size() == 5 && offsets[0] == cap.capture) {
             one.offset = [offsets[1], offsets[2], offsets[3], offsets[4]];
         }
@@ -969,7 +1054,7 @@ void Run.emit_simple(int pattern, View view, str type_name, bool is_named_view) 
         for (int item in query.node_items[root]) {
             int alternative = query.item_node[item];
             bool is_named_alternative = query.node_kind[alternative] == K_NAMED;
-            if (is_named_alternative == is_named_view && query.node_name[alternative] == type_name) {
+            if (is_named_alternative == is_named_view && is_type(query.node_name[alternative], type_name, view.supers)) {
                 is_hit = true;
                 break;
             }
@@ -977,12 +1062,15 @@ void Run.emit_simple(int pattern, View view, str type_name, bool is_named_view) 
         if (!is_hit) {
             return;
         }
-    } else if ((query.node_kind[root] == K_NAMED) != is_named_view || query.node_name[root] != type_name) {
+    } else if ((query.node_kind[root] == K_NAMED) != is_named_view || !is_type(query.node_name[root], type_name, view.supers)) {
         return;
     }
     List<int> offsets = query.pattern_offsets[pattern];
     for (int capture in query.node_captures[root]) {
+        matches = matches + 1;
         Found one = Found(query.capture_names[capture], view.start, view.stop, pattern);
+        one.node = view.node;
+        one.match_id = matches;
         if (offsets.size() == 5 && offsets[0] == capture) {
             one.offset = [offsets[1], offsets[2], offsets[3], offsets[4]];
         }
@@ -1001,6 +1089,16 @@ void Run.try_patterns(List<int> patterns, View view, List<str> ancestors) {
 void Run.visit(View view, List<str> ancestors, int from, int last) {
     str type_name = type_of(view);
     List<int> typed = query.by_type.get(type_name).or([]);
+    if (view.supers.size() > 0) {
+        typed = typed.slice(0, typed.size());
+        for (str super_name in view.supers) {
+            for (int pattern in query.by_type.get(super_name).or([])) {
+                if (!typed.contains(pattern)) {
+                    typed.push(pattern);
+                }
+            }
+        }
+    }
     if (typed.size() > 0) {
         bool is_named_view = is_named(view);
         for (int pattern in typed) {
@@ -1057,8 +1155,9 @@ List<Cap> clone_caps(List<Cap> caps) {
  * start, then longer first, then pattern number. */
 pub List<Found> run(Query query, GRV_tree.Tree tree, str text, int from, int last) {
     Run runner = Run(query, tree, tree.lang, text);
+    runner.find_supertypes();
     int root_start = tree.padding[tree.root];
-    View root = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1);
+    View root = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1, []);
     List<str> ancestors = [];
     runner.visit(root, ancestors, from, last);
     if (query.sequences.size() > 0) {
@@ -1093,7 +1192,7 @@ pub List<int> ancestry(GRV_tree.Tree tree, int position) {
         return out;
     }
     int root_start = tree.padding[tree.root];
-    View view = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1);
+    View view = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1, []);
     bool is_going = true;
     while (is_going) {
         if (runner.is_named(view)) {
@@ -1106,6 +1205,42 @@ pub List<int> ancestry(GRV_tree.Tree tree, int position) {
         is_going = false;
         for (View kid in runner.kids_in(view, position, position)) {
             if (kid.start <= position && position < kid.stop) {
+                view = kid;
+                is_going = true;
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+/// A node of the visible tree as `links_at` reports it.
+pub type Link {
+    pub int node;
+    pub int start;
+    pub int stop;
+    pub str name;
+    pub bool is_named;
+    pub bool has_error;
+}
+
+/** The visible nodes (anonymous ones too) that span the bytes [from, to), outermost first: tree-sitter's
+ * `descendant_for_range` is the last of them, `parent` the one before. */
+pub List<Link> links_at(GRV_tree.Tree tree, int from, int upto) {
+    Run runner = Run(Query(), tree, tree.lang, "");
+    List<Link> out = [];
+    if (tree.root < 0) {
+        return out;
+    }
+    int root_start = tree.padding[tree.root];
+    View view = View(tree.root, root_start, root_start + tree.size[tree.root], -1, -1, []);
+    bool is_going = true;
+    while (is_going) {
+        bool is_bad = tree.has_flag(view.node, GRV_tree.FLAG_ERROR) || tree.has_flag(view.node, GRV_tree.FLAG_HAS_ERROR);
+        out.push(Link(view.node, view.start, view.stop, runner.type_of(view), runner.is_named(view), is_bad));
+        is_going = false;
+        for (View kid in runner.kids_in(view, from, upto)) {
+            if (kid.start <= from && upto <= kid.stop) {
                 view = kid;
                 is_going = true;
                 break;

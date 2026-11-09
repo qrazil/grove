@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.0 (the tick budget, objects, folds, indent, injections)
+
+- The 8 ms tick overrun found: list doubling in `realloc` at 65 536 / 131 072 / 262 144 nodes (glibc copies
+  and touches large blocks once its mmap threshold has risen). With `MALLOC_MMAP_THRESHOLD_=65536` the slowest
+  tick is 1.3 ms instead of 12; the fix belongs in m31's runtime (`mallopt`), see SPEC 21.1. In grove: the
+  parser rebuilds its stack arena from the live versions (a 20 000-record document keeps 3 622 entries, not
+  440 000); tree compaction is sliced (`Compactor`); `t_work` bounds the work of a round by count.
+- `GRV_med`: `objects`, `folds`, `injections`, `indent` (nvim-treesitter's algorithm without `indent.align`),
+  `add_queries`, `shiftwidth`. Query files vendored for json, c, lua with attribution
+  (`tests/data/queries/NOTICE.md`).
+- Query engine: supertype patterns by the hidden nodes of the parse tree, `#make-range!`, `#kind-eq?`, anchors
+  in sibling groups, dotted names (`injection.language` lost its `#set!` properties before).
+- Oracle: textobjects, folds, injections captures (fixtures all identical) and indentation line by line
+  against nvim-treesitter (241 lines identical). `tests/oracle/refresh_captures.sh` regenerates all of it.
+- Tests: `t_work` (6), `t_med_queries` (19), `t_med_oracle` (16); `t_query_oracle` 174 checks.
+
 ## 0.7.0 (query speed, the editor seam)
 
 - Queries: patterns indexed under every type they can match (alternations, groups of one), type-only

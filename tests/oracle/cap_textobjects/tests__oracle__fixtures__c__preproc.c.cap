@@ -1,0 +1,21 @@
+@@ c tests/oracle/fixtures/c/preproc.c
+statement.outer 4 4 4 35
+number.inner 4 34 4 35
+function.outer 5 0 5 18
+statement.outer 5 0 5 18
+assignment.inner 5 4 5 17
+parameter.inner 5 12 5 16
+statement.outer 6 0 7 18
+function.outer 7 0 7 18
+statement.outer 7 0 7 18
+assignment.inner 7 4 7 17
+parameter.inner 7 12 7 16
+comment.outer 9 0 10 13
+function.outer 11 0 11 45
+parameter.inner 11 21 11 26
+block.outer 11 28 11 45
+return.outer 11 30 11 43
+statement.outer 11 30 11 43
+return.inner 11 37 11 42
+comment.outer 11 46 11 57
+function.inner 11 30 11 43

@@ -1,0 +1,4 @@
+@@ c tests/oracle/fixtures/c/micro/l.c
+statement.outer 0 4 0 13
+statement.outer 1 0 1 6
+assignment.inner 1 4 1 5

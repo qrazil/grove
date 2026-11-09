@@ -38,6 +38,8 @@ import core.GRV_query;
 import core.GRV_tree;
 import timer;
 
+const int UNITS_PER_STEP = 256;
+
 pub type Range {
     pub int start_row;
     pub int start_col;
@@ -73,6 +75,9 @@ type Language {
     str error_text = "";
     Option<GRV_lexer.Lexer> lexer = Option<GRV_lexer.Lexer>.None;
     GRV_query.Query query = GRV_query.Query();
+    // the other query files, by kind: "textobjects", "folds", "indents", "injections"
+    Map<str, str> extra_texts = {};
+    Map<str, GRV_query.Query> extra = {};
 }
 
 type Doc {
@@ -86,6 +91,7 @@ type Doc {
     Option<GRV_glr.Parser> parser = Option<GRV_glr.Parser>.None;
     bool is_pending = true;
     int live_nodes = 0;
+    Option<GRV_tree.Compactor> compactor = Option<GRV_tree.Compactor>.None;
 }
 
 // start offset of every line of `lines` joined with "\n"
@@ -138,11 +144,27 @@ pub type Backend {
     List<int> queue = [];
     /// how many nodes a tree may hold, as a multiple of what it held after its last compaction
     pub int compactions = 0;
+    /// the width of one indent level, for `indent`
+    pub int shiftwidth = 4;
+    /// a tree is compacted when its arena holds more than four times the nodes of its first parse plus this many
+    pub int compact_floor = 100000;
 }
 
 /// Make a grammar available: its grammar.json text and its highlights query (the text of a .scm file).
 pub void Backend.add_language(str name, str grammar_text, str highlights_text) {
     languages.set(name, Language(name, grammar_text, highlights_text));
+}
+
+/** Add a query file for a language: `kind` is "textobjects", "folds", "indents" or "injections". Call it
+ * before the language is first used. */
+pub void Backend.add_queries(str language, str kind, str text) {
+    match (languages.get(language)) {
+        case Some(Language known): {
+            known.extra_texts.set(kind, text);
+        }
+        case None: {
+        }
+    }
 }
 
 pub bool Backend.has_language(str language) {
@@ -203,6 +225,7 @@ pub void Backend.edit(int document, Edit change, List<str> lines) {
                 }
             }
             doc.parser = Option<GRV_glr.Parser>.None;
+            doc.compactor = Option<GRV_tree.Compactor>.None;
             doc.lines = lines;
             doc.text = text;
             doc.starts = starts;
@@ -258,6 +281,14 @@ void Backend.make_ready(Language language) {
             } else {
                 language.query = query;
             }
+            for (str kind in language.extra_texts.keys()) {
+                GRV_query.Query other = GRV_query.parse(language.extra_texts.get(kind).or(""));
+                if (!other.is_failed) {
+                    language.extra.set(kind, other);
+                } else {
+                    language.error_text = kind + ": " + other.error_text;
+                }
+            }
             language.is_ready = true;
         }
     }
@@ -311,7 +342,58 @@ pub bool Backend.did_tick(int budget_us) {
             return is_changed;
         }
     }
+    compact_some(began, budget_ns);
     return is_changed;
+}
+
+/* With nothing left to parse, a tree whose arena holds more than four times the nodes it held after
+ * its first parse (plus `compact_floor`, 100 000) is copied into a fresh one, UNITS_PER_STEP node visits at a time, as
+ * long as the budget lasts; an edit throws the half-made copy away. */
+void Backend.compact_some(int began, int budget_ns) {
+    for (int document in docs.keys()) {
+        match (docs.get(document)) {
+            case None: {
+            }
+            case Some(Doc doc): {
+                if (doc.is_pending) {
+                    continue;
+                }
+                match (doc.tree) {
+                    case None: {
+                    }
+                    case Some(GRV_tree.Tree tree): {
+                        if (doc.live_nodes > 0 && tree.arena_size() > doc.live_nodes * 4 + compact_floor) {
+                            match (doc.compactor) {
+                                case None: {
+                                    doc.compactor = Option<GRV_tree.Compactor>.Some(tree.begin_compact());
+                                }
+                                case Some(GRV_tree.Compactor started): {
+                                }
+                            }
+                            match (doc.compactor) {
+                                case None: {
+                                }
+                                case Some(GRV_tree.Compactor compactor): {
+                                    while (!compactor.is_done && timer.monotonic_ns() - began < budget_ns) {
+                                        compactor.did_step(UNITS_PER_STEP);
+                                    }
+                                    if (compactor.is_done) {
+                                        doc.tree = Option<GRV_tree.Tree>.Some(compactor.fresh);
+                                        doc.live_nodes = compactor.fresh.arena_size();
+                                        doc.compactor = Option<GRV_tree.Compactor>.None;
+                                        compactions = compactions + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (timer.monotonic_ns() - began >= budget_ns) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 // run the parser of `doc` for about `left_ns`; true when its tree is finished (and the version went up)
@@ -332,13 +414,10 @@ bool Backend.did_finish_step(Doc doc, GRV_lexer.Lexer lexer, int left_ns) {
                 return false;
             }
             GRV_tree.Tree tree = parser.tree;
-            if (doc.live_nodes > 0 && tree.arena_size() > doc.live_nodes * 4 + 100000) {
-                tree = tree.compact();
-                compactions = compactions + 1;
-            }
-            if (doc.live_nodes == 0 || tree.arena_size() < doc.live_nodes) {
+            if (doc.live_nodes == 0) {
                 doc.live_nodes = tree.arena_size();
             }
+            doc.compactor = Option<GRV_tree.Compactor>.None;
             doc.tree = Option<GRV_tree.Tree>.Some(tree);
             doc.parser = Option<GRV_glr.Parser>.None;
             doc.is_pending = false;
@@ -420,27 +499,309 @@ pub List<Range> Backend.selection_chain(int document, int row, int column) {
     }
 }
 
+Option<Context> Backend.context(int document, str kind) {
+    Option<Context> none = Option<Context>.None;
+    match (docs.get(document)) {
+        case None: {
+            return none;
+        }
+        case Some(Doc doc): {
+            match (doc.tree) {
+                case None: {
+                    return none;
+                }
+                case Some(GRV_tree.Tree tree): {
+                    match (languages.get(doc.language)) {
+                        case None: {
+                            return none;
+                        }
+                        case Some(Language language): {
+                            if (tree.root < 0) {
+                                return none;
+                            }
+                            match (language.extra.get(kind)) {
+                                case None: {
+                                    return none;
+                                }
+                                case Some(GRV_query.Query query): {
+                                    return Option<Context>.Some(Context(doc, tree, query));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The ranges of the objects of `kind` (a capture of textobjects.scm: `function.outer`, ...) around a
+ * position, innermost first. `#make-range!` ranges count as captures. */
 pub List<Range> Backend.objects(int document, str kind, int row, int column) {
-    List<Range> none = [];
-    return none;
+    List<Range> out = [];
+    match (context(document, "textobjects")) {
+        case None: {
+            return out;
+        }
+        case Some(Context found): {
+            int position = offset_of(found.doc.starts, row, column, found.doc.text.size());
+            List<GRV_query.Found> hits = [];
+            for (GRV_query.Found one in GRV_query.run(found.query, found.tree, found.doc.text, position, position)) {
+                if (one.name == kind && one.start <= position && position < one.stop) {
+                    hits.push(one);
+                }
+            }
+            // smaller first; insertion sort, the lists are short
+            for (int index in 1 .. hits.size()) {
+                int cursor = index;
+                while (cursor > 0 && hits[cursor].stop - hits[cursor].start < hits[cursor - 1].stop - hits[cursor - 1].start) {
+                    GRV_query.Found swap = hits[cursor];
+                    hits[cursor] = hits[cursor - 1];
+                    hits[cursor - 1] = swap;
+                    cursor = cursor - 1;
+                }
+            }
+            for (GRV_query.Found one in hits) {
+                out.push(range_of(found.doc.starts, one.start, one.stop));
+            }
+            return out;
+        }
+    }
 }
 
+/// The ranges `@fold` captures of folds.scm give that span more than one row, each once, in order.
 pub List<Range> Backend.folds(int document) {
-    List<Range> none = [];
-    return none;
+    List<Range> out = [];
+    match (context(document, "folds")) {
+        case None: {
+            return out;
+        }
+        case Some(Context found): {
+            Map<str, bool> seen = {};
+            for (GRV_query.Found one in GRV_query.run(found.query, found.tree, found.doc.text, 0, found.doc.text.size())) {
+                if (one.name != "fold") {
+                    continue;
+                }
+                Range range = range_of(found.doc.starts, one.start, one.stop);
+                if (range.end_row == range.start_row) {
+                    continue;
+                }
+                str key = str(one.start) + ":" + str(one.stop);
+                if (!seen.contains(key)) {
+                    seen.set(key, true);
+                    out.push(range);
+                }
+            }
+            return out;
+        }
+    }
 }
 
-pub int Backend.indent(int document, int row) {
-    return -1;
-}
-
+/** The ranges `@injection.content` captures of injections.scm give, with the language each names:
+ * `#set! injection.language "x"` on the pattern, or the text of an `@injection.language` capture in the
+ * same match. Matches without a language are left out. */
 pub List<Injection> Backend.injections(int document) {
-    List<Injection> none = [];
-    return none;
+    List<Injection> out = [];
+    match (context(document, "injections")) {
+        case None: {
+            return out;
+        }
+        case Some(Context found): {
+            List<GRV_query.Found> hits = GRV_query.run(found.query, found.tree, found.doc.text, 0, found.doc.text.size());
+            for (GRV_query.Found one in hits) {
+                if (one.name != "injection.content") {
+                    continue;
+                }
+                str language = "";
+                if (one.pattern < found.query.properties.size()) {
+                    language = found.query.properties[one.pattern].get("injection.language").or("");
+                }
+                if (language == "") {
+                    for (GRV_query.Found other in hits) {
+                        if (other.match_id == one.match_id && other.name == "injection.language") {
+                            language = found.doc.text.substr(other.start, other.stop);
+                        }
+                    }
+                }
+                if (language != "") {
+                    Range range = range_of(found.doc.starts, one.start, one.stop);
+                    if (one.offset.size() == 4) {
+                        range = Range(range.start_row + one.offset[0], range.start_col + one.offset[1], range.end_row + one.offset[2], range.end_col + one.offset[3]);
+                    }
+                    out.push(Injection(range, language));
+                }
+            }
+            return out;
+        }
+    }
+}
+
+/** The indent in columns that indents.scm asks for on `row`, by the algorithm of nvim-treesitter's
+ * indent.lua without `indent.align`; -1 for no opinion (the line is inside an `@indent.auto` node).
+ * `shiftwidth` is the width of one level. */
+pub int Backend.indent(int document, int row) {
+    match (context(document, "indents")) {
+        case None: {
+            return -1;
+        }
+        case Some(Context found): {
+            Doc doc = found.doc;
+            if (row < 0 || row >= doc.lines.size()) {
+                return -1;
+            }
+            Map<int, int> marks = indent_marks(found);
+            int line_number = row + 1;
+            GRV_query.Link node = node_at(found, row, blank_width(doc, row));
+            if (doc.lines[row].trim() == "") {
+                int previous = row;
+                while (previous >= 0 && doc.lines[previous].trim() == "") {
+                    previous = previous - 1;
+                }
+                if (previous < 0) {
+                    return 0;
+                }
+                int lead = blank_width(doc, previous);
+                str trimmed = doc.lines[previous].trim();
+                node = node_at(found, previous, lead + trimmed.size() - 1);
+                if (node.name.contains("comment")) {
+                    GRV_query.Link first = node_at(found, previous, lead);
+                    int node_column = node.start - doc.starts[previous];
+                    if (first.node != node.node) {
+                        str cut = doc.lines[previous].substr(0, node_column).trim();
+                        node = node_at(found, previous, lead + cut.size() - 1);
+                    }
+                }
+                if ((marks.get(node.node).or(0) & INDENT_END) != 0) {
+                    node = node_at(found, row, blank_width(doc, row));
+                }
+            }
+            // the chain from the node outwards; its parent is the one before it
+            List<GRV_query.Link> chain = GRV_query.links_at(found.tree, node.start, node.stop);
+            int top = chain.size() - 1;
+            while (top >= 0 && chain[top].node != node.node) {
+                top = top - 1;
+            }
+            if (top < 0) {
+                return 0;
+            }
+            if ((marks.get(node.node).or(0) & INDENT_ZERO) != 0) {
+                return 0;
+            }
+            int indent = 0;
+            Map<int, bool> is_processed_by_row = {};
+            int level = top;
+            while (level >= 0) {
+                GRV_query.Link current = chain[level];
+                int mark = marks.get(current.node).or(0);
+                int start_row = row_of(doc.starts, current.start);
+                int stop_row = row_of(doc.starts, current.stop);
+                bool is_begin = (mark & INDENT_BEGIN) != 0;
+                if (!is_begin && (mark & INDENT_AUTO) != 0 && start_row < line_number - 1 && line_number - 1 <= stop_row) {
+                    return -1;
+                }
+                if (!is_begin && (mark & INDENT_IGNORE) != 0 && start_row < line_number - 1 && line_number - 1 <= stop_row) {
+                    return 0;
+                }
+                bool is_processed = false;
+                bool was_row_done = is_processed_by_row.get(start_row).or(false);
+                if (!was_row_done && (((mark & INDENT_BRANCH) != 0 && start_row == line_number - 1) || ((mark & INDENT_DEDENT) != 0 && start_row != line_number - 1))) {
+                    indent = indent - shiftwidth;
+                    is_processed = true;
+                }
+                bool is_in_error = false;
+                if (!was_row_done && level > 0) {
+                    is_in_error = chain[level - 1].has_error;
+                }
+                if (!was_row_done && is_begin && (start_row != stop_row || is_in_error || (mark & INDENT_IMMEDIATE) != 0) && (start_row != line_number - 1 || (mark & INDENT_START_SAME_LINE) != 0)) {
+                    indent = indent + shiftwidth;
+                    is_processed = true;
+                }
+                if (is_processed) {
+                    is_processed_by_row.set(start_row, true);
+                }
+                level = level - 1;
+            }
+            return indent;
+        }
+    }
 }
 
 Range range_of(List<int> starts, int start, int stop) {
     int start_row = row_of(starts, start);
     int stop_row = row_of(starts, stop);
     return Range(start_row, start - starts[start_row], stop_row, stop - starts[stop_row]);
+}
+
+// the document, its tree and the query of `kind` for it, if all of them exist
+type Context {
+    Doc doc;
+    GRV_tree.Tree tree;
+    GRV_query.Query query;
+}
+
+// ------------------------------------------------------------------ indent
+
+// what indents.scm says about nodes: node id -> bit set of INDENT_* and the properties of the pattern
+const int INDENT_BEGIN = 1;
+const int INDENT_END = 2;
+const int INDENT_DEDENT = 4;
+const int INDENT_BRANCH = 8;
+const int INDENT_IGNORE = 16;
+const int INDENT_ZERO = 32;
+const int INDENT_AUTO = 64;
+const int INDENT_IMMEDIATE = 128;
+const int INDENT_START_SAME_LINE = 256;
+
+Map<int, int> indent_marks(Context found) {
+    Map<int, int> marks = {};
+    for (GRV_query.Found one in GRV_query.run(found.query, found.tree, found.doc.text, 0, found.doc.text.size())) {
+        int bit = 0;
+        if (one.name == "indent.begin") {
+            bit = INDENT_BEGIN;
+            Map<str, str> props = found.query.properties[one.pattern];
+            if (props.contains("indent.immediate")) {
+                marks.set(one.node, marks.get(one.node).or(0) | INDENT_IMMEDIATE);
+            }
+            if (props.contains("indent.start_at_same_line")) {
+                marks.set(one.node, marks.get(one.node).or(0) | INDENT_START_SAME_LINE);
+            }
+        } else if (one.name == "indent.end") {
+            bit = INDENT_END;
+        } else if (one.name == "indent.dedent") {
+            bit = INDENT_DEDENT;
+        } else if (one.name == "indent.branch") {
+            bit = INDENT_BRANCH;
+        } else if (one.name == "indent.ignore") {
+            bit = INDENT_IGNORE;
+        } else if (one.name == "indent.zero") {
+            bit = INDENT_ZERO;
+        } else if (one.name == "indent.auto") {
+            bit = INDENT_AUTO;
+        }
+        if (bit != 0 && one.node >= 0) {
+            marks.set(one.node, marks.get(one.node).or(0) | bit);
+        }
+    }
+    return marks;
+}
+
+// leading blanks of line `row`
+int blank_width(Doc doc, int row) {
+    str line = doc.lines[row];
+    int width = 0;
+    while (width < line.size() && (line.byte_at(width) == 32 || line.byte_at(width) == 9)) {
+        width = width + 1;
+    }
+    return width;
+}
+
+// the innermost node spanning the byte `column` of line `row` (tree-sitter's descendant_for_range)
+GRV_query.Link node_at(Context found, int row, int column) {
+    int from = offset_of(found.doc.starts, row, column, found.doc.text.size());
+    List<GRV_query.Link> chain = GRV_query.links_at(found.tree, from, from + 1);
+    if (chain.size() == 0) {
+        List<GRV_query.Link> root = GRV_query.links_at(found.tree, 0, 0);
+        return root[0];
+    }
+    return chain[chain.size() - 1];
 }

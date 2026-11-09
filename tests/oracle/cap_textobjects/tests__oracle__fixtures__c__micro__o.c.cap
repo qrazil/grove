@@ -1,0 +1,3 @@
+@@ c tests/oracle/fixtures/c/micro/o.c
+class.outer 0 8 3 1
+class.inner 1 0 3 1

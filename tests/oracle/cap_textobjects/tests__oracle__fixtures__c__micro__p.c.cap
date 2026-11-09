@@ -1,0 +1,3 @@
+@@ c tests/oracle/fixtures/c/micro/p.c
+class.outer 0 8 0 22
+class.inner 0 13 0 22

@@ -1,0 +1,4 @@
+@@ lua tests/oracle/fixtures/lua/tables.lua
+fold 0 10 0 67
+fold 0 47 0 64
+fold 3 7 3 62

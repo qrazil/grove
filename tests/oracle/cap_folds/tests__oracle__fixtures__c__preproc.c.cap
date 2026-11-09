@@ -1,0 +1,8 @@
+@@ c tests/oracle/fixtures/c/preproc.c
+fold 0 0 12 6
+fold 2 0 3 0
+fold 4 0 8 6
+fold 6 0 7 18
+fold 9 0 10 13
+fold 11 0 11 45
+fold 11 46 11 57

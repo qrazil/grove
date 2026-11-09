@@ -1,0 +1,7 @@
+@@ json tests/oracle/fixtures/simple.json
+fold 0 0 0 46
+fold 0 1 0 27
+fold 0 6 0 27
+fold 0 29 0 45
+fold 0 34 0 45
+fold 0 35 0 44

@@ -1,0 +1,3 @@
+@@ c tests/oracle/fixtures/c/micro/macro_comment.c
+injection.content 0 12 1 16
+injection.content 1 16 2 8
