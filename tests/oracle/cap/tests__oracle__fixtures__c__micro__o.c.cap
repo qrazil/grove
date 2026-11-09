@@ -1,0 +1,12 @@
+@@ c tests/oracle/fixtures/c/micro/o.c
+keyword.type 0 0 0 7
+keyword.type 0 8 0 12
+punctuation.bracket 1 0 1 1
+variable 2 2 2 7
+constant 2 2 2 7
+constant 2 2 2 7
+punctuation.delimiter 2 7 2 8
+punctuation.bracket 3 0 3 1
+type 3 2 3 3
+type.definition 3 2 3 3
+punctuation.delimiter 3 3 3 4

@@ -1,0 +1,15 @@
+@@ lua tests/oracle/fixtures/lua/hello.lua
+keyword 0 0 0 5
+variable 0 6 0 10
+operator 0 11 0 12
+string 0 13 0 20
+variable 1 0 1 5
+function.call 1 0 1 5
+function.builtin 1 0 1 5
+punctuation.bracket 1 5 1 6
+string 1 6 1 15
+operator 1 16 1 18
+variable 1 19 1 23
+operator 1 24 1 26
+string 1 27 1 30
+punctuation.bracket 1 30 1 31

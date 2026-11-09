@@ -1,0 +1,13 @@
+@@ c tests/oracle/fixtures/c/micro/macro_comment.c
+keyword.directive.define 0 0 0 7
+variable 0 8 0 9
+function.macro 0 8 0 9
+punctuation.bracket 0 9 0 10
+variable 0 10 0 11
+variable.parameter 0 10 0 11
+punctuation.bracket 0 11 0 12
+comment 0 12 1 16
+spell 0 12 1 16
+type.builtin 3 0 3 3
+variable 3 4 3 5
+punctuation.delimiter 3 5 3 6

@@ -1,0 +1,6 @@
+@@ c tests/oracle/fixtures/c/micro/e.c
+keyword.import 0 0 0 8
+string 0 9 0 12
+type.builtin 1 1 1 4
+variable 1 5 1 6
+punctuation.delimiter 1 6 1 7

@@ -1,0 +1,9 @@
+@@ c tests/oracle/fixtures/c/micro/l.c
+keyword.directive 0 0 0 3
+function.macro 0 4 0 13
+variable 0 12 0 13
+constant.macro 0 12 0 13
+type.builtin 1 0 1 3
+variable 1 4 1 5
+punctuation.delimiter 1 5 1 6
+keyword.directive 2 0 2 6

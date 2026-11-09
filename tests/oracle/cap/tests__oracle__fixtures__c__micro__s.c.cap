@@ -1,0 +1,10 @@
+@@ c tests/oracle/fixtures/c/micro/s.c
+keyword.directive.define 0 0 0 7
+variable 0 8 0 9
+constant.macro 0 8 0 9
+variable 0 9 0 11
+comment 1 0 1 7
+spell 1 0 1 7
+type.builtin 2 0 2 3
+variable 2 4 2 5
+punctuation.delimiter 2 5 2 6
