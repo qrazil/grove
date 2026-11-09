@@ -472,6 +472,15 @@ bool Gen.is_name(int value) {
     return value <= -1000000000;
 }
 
+/* The precedence an item of production `prod` has in a conflict: the named one it is written with, else
+ * the one its rule has by being listed in `precedences`, else the integer or none. */
+int Gen.item_precedence(int prod, int step_prec) {
+    if (is_name(step_prec)) {
+        return step_prec;
+    }
+    return lang.rule_prec.get(lang.prod_lhs[prod]).or(step_prec);
+}
+
 // > 0 if a binds tighter than b, < 0 if looser, 0 if equal or incomparable
 int Gen.compare_precedence(int left, int right) {
     if (left == right) {
@@ -527,7 +536,7 @@ List<int> Gen.resolve(int shift_to, int shift_prec, List<int> reduces) {
         int assoc = GRV_lang.ASSOC_NONE;
         if (lang.prod_length[prod] > 0) {
             int last = lang.prod_start[prod] + lang.prod_length[prod] - 1;
-            prec = lang.step_prec[last];
+            prec = item_precedence(prod, lang.step_prec[last]);
             assoc = lang.step_assoc[last];
         }
         if (shift_to >= 0) {
@@ -601,9 +610,9 @@ void Gen.build_actions() {
                     if (!shift_to.contains(symbol)) {
                         terms.push(symbol);
                         shift_to.set(symbol, target);
-                        shift_prec.set(symbol, lang.step_prec[cursor]);
-                    } else if (compare_precedence(lang.step_prec[cursor], shift_prec.get(symbol).or(0)) > 0) {
-                        shift_prec.set(symbol, lang.step_prec[cursor]);
+                        shift_prec.set(symbol, item_precedence(prod, lang.step_prec[cursor]));
+                    } else if (compare_precedence(item_precedence(prod, lang.step_prec[cursor]), shift_prec.get(symbol).or(0)) > 0) {
+                        shift_prec.set(symbol, item_precedence(prod, lang.step_prec[cursor]));
                     }
                 }
             }
@@ -617,8 +626,8 @@ void Gen.build_actions() {
                 int symbol = lang.step_symbol[cursor];
                 if (symbol >= term_count) {
                     for (int term in 1 .. term_count) {
-                        if (has_bit(first, nonterminal_index(symbol) * width, term) && shift_to.contains(term) && compare_precedence(lang.step_prec[cursor], shift_prec.get(term).or(0)) > 0) {
-                            shift_prec.set(term, lang.step_prec[cursor]);
+                        if (has_bit(first, nonterminal_index(symbol) * width, term) && shift_to.contains(term) && compare_precedence(item_precedence(prod, lang.step_prec[cursor]), shift_prec.get(term).or(0)) > 0) {
+                            shift_prec.set(term, item_precedence(prod, lang.step_prec[cursor]));
                         }
                     }
                 }

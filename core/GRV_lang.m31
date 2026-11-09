@@ -55,6 +55,8 @@ pub type Lang {
     pub List<int> extra_nts = [];
     pub Map<int, int> prec_list_of = {};
     pub Map<int, int> prec_position_of = {};
+    /// symbol -> the named precedence of a rule that is itself listed in `precedences`
+    pub Map<int, int> rule_prec = {};
     pub ErrorText error_text = ErrorText();
     Map<str, int> terminal_ids = {};
     Map<str, int> aux_ids = {};
@@ -572,6 +574,20 @@ pub Lang build(GRV_grammar.Grammar grammar) {
             lang.symbol_flags[symbol] = lang.symbol_flags[symbol] + F_EXTRA;
             if (symbol >= lang.term_count) {
                 lang.extra_nts.push(symbol);
+            }
+        }
+    }
+    for (int symbol in lang.term_count .. lang.symbol_name.size()) {
+        str rule = lang.symbol_name[symbol];
+        for (List<str> entries in grammar.precedence_lists) {
+            if (entries.index_of(rule).or(-1) >= 0 && !lang.rule_prec.contains(symbol)) {
+                int id = -(NAME_PRECEDENCE + lang.precedence_ids.size());
+                if (lang.precedence_ids.contains(rule)) {
+                    id = lang.precedence_ids.get(rule).or(0);
+                } else {
+                    lang.precedence_ids.set(rule, id);
+                }
+                lang.rule_prec.set(symbol, id);
             }
         }
     }
