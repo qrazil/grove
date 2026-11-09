@@ -438,7 +438,7 @@ void apply_context(List<List<int>> alts, int field, int alias, int prec, int ass
             if (alt[cursor + 2] < 0) {
                 alt[cursor + 2] = alias;
             }
-            if (alt[cursor + 3] == 0 && prec != 0) {
+            if (alt[cursor + 3] == 0 && alt[cursor + 4] == 0 && (prec != 0 || assoc != 0)) {
                 alt[cursor + 3] = prec;
                 alt[cursor + 4] = assoc;
             }

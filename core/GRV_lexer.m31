@@ -50,6 +50,7 @@ pub type Lexer {
     List<int> row = [];
     List<int> row_skip = [];
     List<int> is_skip_state = [];
+    List<int> nfa_owner = [];
     Map<int, List<int>> hubs = {};
     Map<int, int> wide = {};
     Map<str, int> set_ids = {};
@@ -219,6 +220,13 @@ int Lexer.step(int state, int code_point) {
             for (int target in hub_skip) {
                 skip_targets.push(target);
             }
+        } else if (accept[state] >= 0) {
+            // after a character that began a token, a token of higher precedence than the one accepted may still start
+            for (int member in hub_of(state_valid[state], false)) {
+                if (nfa.kind[member] == GRV_regex.N_CLASS && is_skip_state[member] == 0 && nfa.classes.is_member(nfa.arg[member], code_point) && nfa_owner[member] >= 0 && lang.symbol_prec[nfa_owner[member]] > lang.symbol_prec[accept[state]]) {
+                    token_targets.push(nfa.out1[member]);
+                }
+            }
         }
     }
     bool is_all_skip = token_targets.size() == 0;
@@ -318,9 +326,12 @@ pub Lexer make(GRV_lr.Table table) {
     Lexer lexer = Lexer(lang, table);
     int restart = lexer.nfa.state(GRV_regex.N_RESTART, 0, -1, -1);
     List<int> skip_ranges = [];
+    List<int> owner_ranges = [];
     for (int term in 0 .. lang.term_count) {
         if (term > 0 && lang.symbol_root[term] >= 0) {
             int before = lexer.nfa.kind.size();
+            owner_ranges.push(before);
+            owner_ranges.push(term);
             if (lang.has_flag(term, GRV_lang.F_SKIP)) {
                 lexer.term_start.push(lexer.nfa.compile_rule(lang.grammar, lang.symbol_root[term], restart));
                 skip_ranges.push(before);
@@ -336,6 +347,17 @@ pub Lexer make(GRV_lr.Table table) {
     for (int i in 0 .. lexer.nfa.kind.size()) {
         lexer.mark.push(0);
         lexer.is_skip_state.push(0);
+        lexer.nfa_owner.push(-1);
+    }
+    for (int range_index in 0 .. owner_ranges.size() / 2) {
+        int range_from = owner_ranges[range_index * 2];
+        int range_to = lexer.nfa.kind.size();
+        if (range_index * 2 + 2 < owner_ranges.size()) {
+            range_to = owner_ranges[range_index * 2 + 2];
+        }
+        for (int member in range_from .. range_to) {
+            lexer.nfa_owner[member] = owner_ranges[range_index * 2 + 1];
+        }
     }
     int range_at = 0;
     while (range_at < skip_ranges.size()) {

@@ -147,10 +147,57 @@ int Parser.reduce(int head, int production, int position, int examined, bool is_
     return top;
 }
 
+/* -1 if the tree `left` sorts before `right`, 1 if after, 0 if they are the same shape: compared
+ * as tree-sitter's ts_subtree_compare does, by symbol id, then by number of children, then
+ * child by child from the first (the symbol ids here follow the same order as its). */
+int Parser.compare_trees(int left, int right) {
+    List<int> pending = [left, right];
+    while (pending.size() > 0) {
+        int right_node = pending.pop();
+        int left_node = pending.pop();
+        if (tree.node_symbol[left_node] != tree.node_symbol[right_node]) {
+            if (tree.node_symbol[left_node] < tree.node_symbol[right_node]) {
+                return -1;
+            }
+            return 1;
+        }
+        if (tree.kid_count[left_node] != tree.kid_count[right_node]) {
+            if (tree.kid_count[left_node] < tree.kid_count[right_node]) {
+                return -1;
+            }
+            return 1;
+        }
+        int count = tree.kid_count[left_node];
+        for (int index in 0 .. count) {
+            int child_at = count - 1 - index;
+            pending.push(tree.kids[tree.kid_at[left_node] + child_at]);
+            pending.push(tree.kids[tree.kid_at[right_node] + child_at]);
+        }
+    }
+    return 0;
+}
+
+/* Which of two trees for the same text the parser keeps, as tree-sitter's ts_parser__select_tree
+ * decides: fewer errors, then higher dynamic precedence, then the one that sorts first. */
+bool Parser.should_replace(int current, int current_dyn, int candidate, int candidate_dyn) {
+    bool is_current_bad = tree.has_flag(current, GRV_tree.FLAG_ERROR) || tree.has_flag(current, GRV_tree.FLAG_HAS_ERROR);
+    bool is_candidate_bad = tree.has_flag(candidate, GRV_tree.FLAG_ERROR) || tree.has_flag(candidate, GRV_tree.FLAG_HAS_ERROR);
+    if (is_current_bad != is_candidate_bad) {
+        return is_current_bad;
+    }
+    if (candidate_dyn != current_dyn) {
+        return candidate_dyn > current_dyn;
+    }
+    if (is_current_bad) {
+        return true;
+    }
+    return compare_trees(current, candidate) == 1;
+}
+
 void Parser.queue_next(int head, int position, int dyn) {
     for (int index in 0 .. next_head.size()) {
         if (stack.state[next_head[index]] == stack.state[head] && stack.parent[next_head[index]] == stack.parent[head] && next_position[index] == position) {
-            if (dyn > next_dyn[index]) {
+            if (should_replace(stack.node[next_head[index]], next_dyn[index], stack.node[head], dyn)) {
                 next_head[index] = head;
                 next_dyn[index] = dyn;
             }
@@ -258,8 +305,9 @@ void Parser.process(int index) {
             work_position.push(position);
             work_dyn.push(dyn + lang.prod_dyn[argument]);
         } else if (kind == GRV_lr.ACCEPT) {
-            if (done_head < 0 || dyn > done_dyn) {
-                done_head = accept(head);
+            int root = accept(head);
+            if (done_head < 0 || should_replace(done_head, done_dyn, root, dyn)) {
+                done_head = root;
                 done_dyn = dyn;
             }
         }
