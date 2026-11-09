@@ -1,6 +1,6 @@
 # grove: specification and feasibility study
 
-Status: **design with a working g1 and g2**, version 0.2.0. Written first as a design
+Status: **design with a working g1, g2 and conflict resolution (0.3.0)**. Written first as a design
 (0.0.1); section 14 records what g1 built and measured, and where it changed the
 design. Decisions of the owner (2026-11-09): all recommendations of
 `QUESTIONS.md` approved, with `treesitter_maxfile` defaulting to **5 MB** (plus a
@@ -1115,7 +1115,9 @@ prototype takes 281 ms for the 113 KB JSON file, 4 times slower than the GLR par
 
 ### 14.4 Where the implementation differs from the design (and why)
 
-1. **LALR was not enough; the tables are LR(1) with merging only when safe.**
+1. **LALR was not enough; the tables are LR(1) with merging only when safe.** (Section 16
+   corrects this: the merging rule described here still failed on `a = b = c`, which g1 claimed to
+   parse; it did not. What is built now is described there.)
    LALR merged the state after an identifier on the right of `=` in C with a
    state where `_expression -> identifier .` can be followed by `=`; the spurious
    shift/reduce conflict was resolved by precedence in favour of the reduce, and
@@ -1244,3 +1246,140 @@ under a third of the tokens of scratch parses (a ratio of counts). `t_recover`:
 slicing with a zero budget gives the same tree as one go; recovery keeps what
 surrounds an error; 150 random texts per grammar always finish with a root that
 covers the input. `compact` keeps the tree.
+
+## 16. Conflict resolution: what tree-sitter really does (version 0.3.0)
+
+The g1 table builder kept far more forks than "the declared conflicts" suggested (c: 33
+against 8 groups; javascript 1 036; python 957; typescript 3 800; kotlin 7 451), and some
+C files failed to parse. g2's hand-back promised to find out why. The question was
+framed wrongly, and the answer is in tree-sitter's own tables and runtime.
+
+### 16.1 Method
+
+- `experiments/ts_forks.py` decodes `ts_parse_actions`, `ts_parse_table` and
+  `ts_small_parse_table` of a grammar's `parser.c` and lists the (state, lookahead) pairs whose
+  action entry holds several actions. `experiments/ts_fork_classes.py` groups them by class (the
+  sorted actions: `S` shift, `R:rule:length` reduce, repeat rules as `AUX`).
+- `tests/forks.m31` prints the same classes for grove's tables, and
+  `experiments/compare_forks.sh` compares the two per grammar. A class is the unit of
+  comparison, not the count: tree-sitter merges states (c has 1 466, grove's first tables had
+  1 961 before and 3 440 now), so one conflict is held by a different number of states in
+  each.
+- The runtime rules were read in `tree-sitter-0.24.7/src/parser.c`
+  (`ts_parser__select_tree`) and `subtree.c` (`ts_subtree_compare`).
+
+### 16.2 What was found
+
+1. **"Declared conflicts" is not a count of forks.** tree-sitter's own `parser.c` holds
+   162 fork pairs for C (34 outside repeats), 171 for JavaScript (131 outside repeats),
+   1 547 for Python (1 386), 1 124 for TypeScript (1 063), 1 721 for Kotlin (1 550), 221 for
+   Java, 102 for Go, 4 for JSON. A `conflicts` group is a set of rules that may be ambiguous;
+   the same group appears in many (state, lookahead) pairs. The right measure is which
+   classes of fork exist, and whether the same ones do in both.
+2. **tree-sitter does not resolve a repeat's `aux -> aux aux` tie.** Its tables keep
+   `REDUCE(aux_repeat) + SHIFT_REPEAT` as a fork (128 of C's 162, all 4 of JSON's). grove
+   resolves the tie to the reduce (a shallow stack); the trees differ only in hidden repeat
+   nodes. A dedicated `SHIFT_REPEAT` exists so the runtime can still treat the two versions as
+   one.
+3. **Which version survives is decided by tree-sitter's runtime, by three rules**, in order
+   (`ts_parser__select_tree`): fewer errors; higher dynamic precedence (a subtree's is the sum
+   over its children and its own production); otherwise `ts_subtree_compare`: the tree whose
+   first differing node has the **lower symbol id**, or, at equal symbols, **fewer children**,
+   walking children in order. grove used only the dynamic precedence and kept the first on a
+   tie, which chose `sizeof ( type_descriptor )` over `sizeof parenthesized_expression`
+   where tree-sitter picks the expression (fewer children). Implemented in
+   `Parser.should_replace`; symbol ids follow the same order as tree-sitter's (terminals by
+   first appearance, then rules, then repeat rules).
+4. **Three static-resolution rules were wrong and are corrected**, each found by a class of fork
+   that tree-sitter does not have:
+   - *Associativity with precedence 0.* `prec.right(0, ...)` (C's `if_statement`, resolving the
+     dangling else) carries an associativity but no precedence; applying a reference's
+     metadata to an inlined rule's steps only when `prec != 0` lost it. The 14 `R:if_statement |
+     S` forks of C vanished.
+   - *Named precedences compare above integers.* A name (`'call'`, `'binary_plus'`) against an
+     unmarked or integer precedence resolves in the name's favour (JavaScript's `arrow_function`
+     against `+`, `.`, `(`); two names compare by their position in a `precedences` list, and
+     names of different lists are equal.
+   - *A shift takes the precedence of the kernel items that lead to it.* In `x => y (`, the shift of
+     `(` belongs to `arguments`, whose own steps have no precedence; the precedence is on the
+     `call_expression` item that has `arguments` after its dot. A kernel item gives its step
+     precedence to every terminal that can start the symbol after its dot.
+5. **Plain LALR was not just imprecise, it was wrong, and the g1 fix did not fully work.**
+   g1 claimed `a = b = c` parsed; with the micro tests it did not (they did not contain it). The
+   cause is in the numbers above: a reduce/shift conflict resolved by precedence is correct only
+   in the contexts where the reduce lookahead is real, and merging contexts adds spurious
+   lookaheads. Pager-style merging (g1) tests conflicts of the state being merged but not the
+   conflicts it creates downstream. What works: **canonical LR(1) identity for the terminals on
+   which any state conflicts, LALR for the rest**. The first pass builds LALR and collects
+   every terminal with a reduce/reduce or reduce/shift conflict (repeat rules excluded: their
+   tie is always settled the same way); the second pass keeps apart states whose lookaheads
+   differ on those terminals and merges the others by union. Because only a conflict makes a
+   lookahead matter, this is exact where it counts. A final pass merges states of equal core with
+   compatible rows (equal actions where both have one, to the same classes), which is what brings
+   canonical LR(1) back near tree-sitter's size (C: 7 301 states to 3 440; tree-sitter 1 466).
+
+### 16.3 Measured
+
+`experiments/compare_forks.sh` (non-repeat forks; classes are shared when "only in" is 0):
+
+| grammar | tree-sitter forks (of which repeat) | non-repeat, tree-sitter | non-repeat, grove | classes only in grove | classes only in tree-sitter |
+|---|--:|--:|--:|--:|--:|
+| json | 4 (4) | 0 | 0 | 0 | 0 |
+| c | 162 (128) | 34 in 7 classes | 24 in 7 | **0** | **0** |
+| go | 102 (38) | 64 in 6 | 54 in 5 | 0 | 1 (1 fork) |
+| java | 221 (163) | 58 in 5 | 84 in 6 | 1 (5 forks) | 0 |
+| python | 1 547 (161) | 1 386 in 6 | 631 in 7 | 1 (2 forks) | 0 |
+| javascript | 171 (40) | 131 in 14 | 692 in 16 | 5 (396 forks) | 3 (22 forks) |
+| typescript | 1 124 (61) | 1 063 in 47 | 1 114 in 52 | 19 (190 forks) | 14 (387 forks) |
+| kotlin | 1 721 (171) | 1 550 in 19 | 1 299 in 20 | 4 (178 forks) | 3 (27 forks) |
+
+The earlier "c 33 against 8 groups" is therefore **24 against 34** with the same 7 classes; the
+"javascript 1 036, python 957, typescript 3 800, kotlin 7 451" are now 692, 631, 1 114 and 1 299,
+against 131, 1 386, 1 063 and 1 550 in tree-sitter. (javascript is the one that is still 5 times
+too high; see 16.4.)
+
+Table builds (`tests/tables.m31`, m31 v0.14.2, `cc -O2`, one core; the new method has a state
+limit of 16 times the LALR count, at most 60 000 (counted before the final merge), beyond which the LALR automaton is kept and the
+table says so):
+
+| grammar | states | table entries (KB as int arrays) | build | resolved how |
+|---|--:|--:|--:|---|
+| json | 42 | 178 (1) | < 1 ms | exact |
+| lua | 441 | 11 713 (91) | 136 ms | exact |
+| c | 3 440 | 153 525 (1 199) | 2.8 s | exact |
+| go | 2 435 | 83 824 (654) | 1.5 s | exact |
+| java | 3 521 | 135 453 (1 058) | 2.5 s | exact |
+| javascript | 5 315 | 265 089 (2 071) | 4.6 s | exact |
+| python | 3 966 | 132 370 (1 034) | 2.3 s | exact |
+| yaml | 889 | 14 971 (116) | 0.2 s | exact |
+| typescript | 7 933 | 327 062 (2 555) | 21 s | LALR (limit) |
+| cpp | 3 649 | 204 132 (1 594) | 13.5 s | LALR (limit) |
+| rust | 5 725 | 204 947 (1 601) | 10.5 s | LALR (limit) |
+| kotlin | 2 354 | 202 404 (1 581) | 3.5 s | LALR (limit) |
+| sql | 15 073 | 197 195 (1 540) | 12.9 s | LALR (limit) |
+| bash | 7 406 | 184 043 (1 437) | 23.6 s | LALR (limit) |
+
+"exact" means the second pass fit under the limit; before the limit existed it took, to finish,
+rust 18.5 s and 59 519 states, typescript 36 s and 16 816 states, cpp 62.5 s and 28 275, bash 51 s and
+23 161, and sql more than 190 s. **For the big grammars the disk cache is no longer an
+optimisation**: even the fallback takes 10 to 24 s, and the exact tables would take a minute.
+
+C against tree-sitter on real files (`experiments/results/c_many_files.txt`): 400 sources and
+headers from `/usr/include` and the kernel tools tree; **143 are comparable** (tree-sitter
+reports no ERROR and no MISSING; the dump now prints anonymous MISSING nodes, which hid 66
+"differences" that were tree-sitter's own error recovery); **140 are identical, 3 differ** (98%).
+JSON stays at 990 of 990.
+
+### 16.4 What is still different
+
+- The extra classes of JavaScript/TypeScript/Kotlin forks (`arrow_function | S`, `object |
+  statement_block`, `class_modifier | simple_identifier`) are cases where grove keeps a fork
+  and tree-sitter resolves, or the other way round; the rule behind them is not found. The
+  first suspects are tree-sitter's treatment of named precedences across the lists and its
+  per-production precedence being the *maximum* over steps rather than the last step's.
+- 3 C files differ (`sized_type_specifier` extent twice, a `preproc_def` extent once); they
+  reproduce only in the whole file, not in any excerpt tried.
+- The LR(1) splitting multiplies states on grammars with many conflict terminals (rust:
+  59 519 states; tree-sitter 3 649). The limit above falls back to LALR; the better fix is
+  a smaller mask (terminals whose conflicts are resolved by precedence, not those that stay
+  forks).

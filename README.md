@@ -3,7 +3,7 @@
 An incremental parser runtime for [m31](https://github.com/qrazil/m31), written in
 m31, that reuses the tree-sitter grammar ecosystem **as data**.
 
-**Status: design, with g1 and g2 built (0.2.0).** The specification is in `docs/`. g1 turns
+**Status: design, with g1, g2 and conflict resolution built (0.3.0).** The specification is in `docs/`. g1 turns
 a grammar.json into LR tables and a lexer at load time and parses with them:
 json and C fixtures are node-for-node identical to tree-sitter's trees. g2 adds an immutable tree, incremental reparse (a mid-file edit of a 1.7 MB JSON
 file reparses in under 0.1 ms), time-sliced parsing and a first error recovery.
@@ -96,7 +96,7 @@ and a parser built from the same revision as the grammar:
 Follows the m31 project layout (`docs/project-layout.md` in the m31 repository):
 
 ```
-deps                 project file (name grove, version 0.2.0)
+deps                 project file (name grove, version 0.3.0)
 core/GRV_*.m31       the library
 tests/test.sh        the single way to run every check
 tests/t_*.m31        unit tests (print "N passed, M failed" last)

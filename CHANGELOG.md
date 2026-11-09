@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 (conflict resolution)
+
+- Found why the fork counts differed from "the declared conflicts": tree-sitter's own tables
+  hold 162 fork pairs for C, 1 547 for Python, 1 721 for Kotlin, and keep the repeat tie as a
+  fork; the comparison is by class (SPEC 16). `tests/forks.m31`, `experiments/ts_forks.py`,
+  `ts_fork_classes.py`, `compare_forks.sh`.
+- Fixed from that comparison: associativity with precedence 0 across `inline`; named
+  precedences above integers; a shift takes the precedence of the kernel items that lead to it;
+  which version survives follows `ts_parser__select_tree` (errors, dynamic precedence, then
+  `ts_subtree_compare`: lower symbol id, fewer children).
+- Tables: canonical LR(1) identity for the terminals on which any state conflicts, LALR for the
+  rest, then merging of states with compatible rows; a state limit falls back to LALR for the
+  big grammars (rust, typescript, cpp, kotlin, sql, bash). `a = b = c`, which 0.1.0 claimed to
+  parse, now does. C: 24 forks in the same 7 classes as tree-sitter's.
+- Lexer: after a character that began a token, a token of higher precedence than the one
+  accepted may still start (`#define X /* c */`).
+- Oracle: `dump_sexp.lua` prints anonymous MISSING nodes, so tree-sitter's own error recovery is
+  no longer counted as a difference: C, 140 of 143 comparable files identical (was 136 of 202).
+- Tests: `t_incr` now applies each random edit and undoes it, comparing after both (equal
+  whenever the text is valid); a tie-break test and two C micro fixtures (`resolve.c`,
+  `macro_comment.c`).
+
 ## 0.2.0 (g2: incremental, resumable, recovering)
 
 - `GRV_tree`: relative padding and size, lookahead window, immutable nodes that
