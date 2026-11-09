@@ -3,11 +3,11 @@
 An incremental parser runtime for [m31](https://github.com/qrazil/m31), written in
 m31, that reuses the tree-sitter grammar ecosystem **as data**.
 
-**Status: design, with g1, g2, conflict resolution and the first external scanner (Lua) built (0.4.0).** The specification is in `docs/`. g1 turns
+**Status: design, with g1, g2, conflict resolution, the first external scanner (Lua) and the query subset Q0 built (0.5.0).** The specification is in `docs/`. g1 turns
 a grammar.json into LR tables and a lexer at load time and parses with them:
 json and C fixtures are node-for-node identical to tree-sitter's trees. g2 adds an immutable tree, incremental reparse (a mid-file edit of a 1.7 MB JSON
 file reparses in under 0.1 ms), time-sliced parsing and a first error recovery.
-There is no query engine yet; Lua is the first language with an external scanner. Nothing is
+Queries (patterns, fields, captures, predicates) run over the tree and agree with nvim's highlights for json, c and lua; Lua is the first language with an external scanner. Nothing is
 released and nothing depends on grove yet.
 
 ## What it is for
@@ -70,6 +70,7 @@ parse, edit, highlights, objects, folds, indent, injections, selection.
 | `GRV_lr` | LR(1) tables with safe state merging, precedence resolution, GLR forks |
 | `GRV_regex`, `GRV_lexer` | lexical rules to a code-point NFA and lazily built DFAs per set of valid terminals |
 | `GRV_glr`, `GRV_tree`, `GRV_edit` | the parser (graph-structured stack, resumable, incremental, recovering), the immutable tree and its dump, edits |
+| `GRV_find`, `GRV_query` | Lua patterns and regex matching for predicates; the tree-sitter query subset Q0 over the visible tree |
 | `GRV_lex`, `GRV_peg` | the first prototype: position-set matching and a PEG interpreter; kept as a cross-check on json |
 
 `tests/t_oracle.m31` compares grove's trees for 8 JSON and 6 C files with tree-sitter's
@@ -96,7 +97,7 @@ and a parser built from the same revision as the grammar:
 Follows the m31 project layout (`docs/project-layout.md` in the m31 repository):
 
 ```
-deps                 project file (name grove, version 0.4.0)
+deps                 project file (name grove, version 0.5.0)
 core/GRV_*.m31       the library
 tests/test.sh        the single way to run every check
 tests/t_*.m31        unit tests (print "N passed, M failed" last)

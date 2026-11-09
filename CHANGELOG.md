@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 (queries, subset Q0)
+
+- `GRV_query`: parse and run tree-sitter queries over the visible tree: patterns, fields, negated
+  fields, captures, alternations, sibling groups, quantifiers, anchors, wildcards, `(ERROR)`;
+  predicates `#eq? #not-eq? #any-eq? #match? #lua-match? #any-of? #has-ancestor? #has-parent?` and
+  `not-` forms; directives `#set!` and `#offset!`. `GRV_find`: the regex and Lua-pattern matcher behind
+  them. SPEC section 18.
+- Oracle: nvim-treesitter highlights for json, c, lua (vendored, `tests/data/queries`) against nvim's own
+  captures: 45 committed fixtures identical; real files json 284/284, lua 299/299, c 93 identical and 3
+  different (the same three tree differences as the tree oracle).
+- Fix from the oracle: a rule that is only a string keeps the anonymous token as its child when the
+  string is also written inline (Lua `empty_statement` and `;`); a TOKEN wrapping only a string is an
+  anonymous token (C `preproc_params`).
+- Tests: `t_find` (18), `t_query` (46), `t_query_oracle` (48). Tools: `tests/oracle/report_captures.sh`,
+  `refresh_captures.sh`, `dump_captures.lua`, `dump_captures.m31`, `compare_captures.py`.
+
 ## 0.4.0 (external scanners, Lua)
 
 - `GRV_scan`: the `Scanner` interface and `ScanLexer`; `GRV_scanners.for_language`;

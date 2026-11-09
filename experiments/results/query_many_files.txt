@@ -1,0 +1,8 @@
+grove vs nvim 0.11.5 query captures (nvim-treesitter cf12346 highlights, tests/data/queries), compiled parsers of the grammar's revision, up to 300 files (<= 60 KB) chosen by a hash of the path; sets of "name start end"
+json (/usr/share, /home/nox/homelab): 284 identical sets, 0 different, 16 skipped
+lua  (/usr/share/nvim, ~/.local/share, /home/nox/homelab): 299 identical sets, 0 different, 1 skipped (not UTF-8)
+c    (/usr/include, /home/nox/homelab): 93 identical sets, 3 different, 204 skipped
+  pthread_cancel-sem_wait.c line 33, malloc-0.c line 18: grove reads `free(p);` as a declaration (type), tree-sitter as a call
+  linux/loong64/sys/mtio.h lines 55, 56, 83: `long mt_dsreg;` grove: type, tree-sitter: property (field declarator)
+Speed (m31 -O2, one core): c 280 KB parse 34 ms, query 151 ms (7824 captures), 4000-byte window 1.2 ms;
+lua 53 KB parse 37 ms, query 158 ms (11801), window 14 ms; json 184 KB parse 63 ms, query 181 ms (29277), window 4 ms

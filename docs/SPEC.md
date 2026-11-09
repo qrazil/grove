@@ -1428,7 +1428,7 @@ the table builder's extra-rule support (SPEC 14.4 item 3) was written for it and
 - 6 other changes were needed to get there, each found by a failing Lua case:
   1. a rule that is just a token (`empty_statement: ';'`) and the same token written inline (the `;`
      between the fields of a table) are two terminals; sharing them printed an `empty_statement` node
-     inside tables;
+     inside tables (0.5.0 refines this, see 18.6);
   2. a token that matches the empty string (`/[^\r\n]*/` after `--`) is a token of no width when nothing
      else matches (an empty comment `--` before the newline);
   3. fragility spreads upward as in tree-sitter: a node whose first or last child is fragile or an ERROR is
@@ -1444,3 +1444,81 @@ the table builder's extra-rule support (SPEC 14.4 item 3) was written for it and
 Scanner state is not part of a node's identity beyond the two flags above; a scanner whose state matters
 inside every node (Python's indent stack) will need the state kept per node, as tree-sitter does; the other
 16 scanners (SPEC 6.2) are untouched.
+
+## 18. Queries, subset Q0 (version 0.5.0)
+
+### 18.1 What is supported
+
+`GRV_query.parse(source)` reads a tree-sitter query file and `GRV_query.run(query, tree, text, from, to)`
+returns the captures of every match whose nodes meet the byte range, sorted by start, longer first, then
+pattern number, without duplicates. Supported syntax:
+
+- node patterns `(type ...)`, anonymous tokens `"text"`, wildcards `(_)` (named) and `_` (any), `(ERROR)`;
+- fields `field: pattern` and negated fields `!field`;
+- captures `@name` (several per node), alternations `[ ... ]`, groups of siblings `( (a) (b) )` (a plain
+  group is spliced into the parent's children; a quantified or captured group of several nodes is not
+  supported), quantifiers `? * +`, anchors `.` (first child, last child, immediate sibling; anonymous
+  nodes are skipped);
+- predicates `#eq?` `#not-eq?` `#any-eq?` `#match?` `#not-match?` `#lua-match?` `#not-lua-match?`
+  `#any-of?` `#not-any-of?` `#has-ancestor?` `#has-parent?` and their `not-` forms (against a capture or a
+  string, as the arguments say); an unknown predicate is true;
+- directives `#set!` (kept per pattern in `Query.properties`) and `#offset!` (the four deltas are
+  reported on each `Found`; the caller applies them as nvim does).
+
+Not supported: quantified or captured multi-node groups, `#is?`/`#is-not?`, `(MISSING ...)` (not tested), supertype
+subtyping (`(expression/identifier)`), predicates written with a different arity than nvim's, and
+`; inherits` / `; extends` (the caller concatenates files).
+
+### 18.2 The visible tree
+
+A query sees the tree-sitter tree, not the parse tree: a hidden node (a name starting with `_`, repeat
+helpers, inlined rules) is replaced by its children; an alias renames a node and makes it named or
+anonymous; the field of a hidden node's child is the field its parent gave the hidden node. Anonymous
+visible tokens match `"text"`. This is why the tree oracle (section 14) and the query oracle agree.
+
+### 18.3 Regexes and Lua patterns
+
+`#match?` compiles its regex with `GRV_regex` (the lexer's engine, so Unicode classes are the
+approximations of 14.4); `GRV_find` adds the leading `^` and trailing `$`. `#lua-match?` translates the
+Lua pattern to the same engine: `%a %d %l %s %u %w %x %p %c` and capitals, sets, `.`, `* + - ?` after an
+item, anchors, groups. `%b` and `%f` are not translated and the predicate is false. nvim and Helix differ:
+nvim-treesitter writes `#lua-match?` and `#has-ancestor?`, Helix writes `#match?` with a different regex
+dialect; both are in the subset, a Helix file is not checked here.
+
+### 18.4 Against nvim
+
+The highlights of nvim-treesitter (cf12346, Apache-2.0, `tests/data/queries`; c.scm pruned of the
+patterns naming node types the grammar revision of the repository does not have) run in nvim 0.11.5 with the
+compiled parsers of the same revision and in grove, over the same bytes; the comparison is of sets of
+`name start end` (rows and columns, `#offset!` applied):
+
+- fixtures (committed, `tests/t_query_oracle.m31`): 45 files, json 8, c 30, lua 7, all identical;
+- real files (`tests/oracle/report_captures.sh`, `experiments/results/query_many_files.txt`): json 284 of
+  284 comparable identical; lua 299 of 299; c 93 identical, 3 different (204 skipped: nvim cannot query
+  them or grove's tree has errors).
+
+The three C differences are tree differences, not query ones: grove makes `free(p);` a declaration with
+`free` a type and `long mt_dsreg;` a sized type with a type_identifier, where tree-sitter picks the call
+and the declarator. They are the kind of difference the tree oracle also shows for C (3 of 143 files, section 14; not
+checked whether they are the same files): a choice between forks that grove's tables do not yet make the
+same way as tree-sitter's.
+
+### 18.5 Speed, not optimized
+
+Measured (m31 -O2, one core, 0.5.0): C highlights on a 280 KB header: parse 34 ms, a full query run 151 ms
+(7 824 captures), a 4 000-byte window 1.2 ms; Lua 53 KB: parse 37 ms, query 158 ms (11 801 captures), a
+4 000-byte window 14 ms; JSON 184 KB: parse 63 ms, query 181 ms, window 4 ms. A query is slower than the
+parse and the window is not yet proportional to its size; it must be below a frame (g4 budget, section 9)
+before the editor calls it on the key path, so the editor runs it on the visible range after a reparse
+and the next step is a per-node index of the patterns that can match (the by-type index is only the
+start of that).
+
+### 18.6 The terminal of a rule that is only a string
+
+tree-sitter's trees show that a rule such as Lua's `empty_statement: ';'` is a node with one anonymous
+child `;`, while json's `true: 'true'` is a node with no children. The difference is whether the same
+string is also written inline in some rule: then there is one anonymous terminal and the rule is a
+non-terminal around it; otherwise the rule itself is the terminal. 0.4.0 made them two terminals, which
+fixed the table fixture but dropped the child, and the query oracle found it (10 of 299 Lua files missed
+`punctuation.delimiter` on a statement `;`). `GRV_lang.build` now notes every token written inline before
+it assigns terminals.
