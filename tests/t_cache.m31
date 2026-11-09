@@ -1,0 +1,136 @@
+/* The table cache (GRV_cache): a table written and read back is the same table and parses the same
+ * trees; a table of another grove version, another grammar, or a damaged file is a miss; nothing but the
+ * final file is left behind; the version in the code is the version in `deps`. */
+
+import core.GRV_cache;
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import fs;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+void clean(str path) {
+    match (fs.rmtree(path, path)) {
+        case Ok: {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+bool is_same(List<int> left, List<int> right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (int index in 0 .. left.size()) {
+        if (left[index] != right[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_sets_same(List<List<int>> left, List<List<int>> right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (int index in 0 .. left.size()) {
+        if (!is_same(left[index], right[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int listing(str path) {
+    match (fs.listdir(path)) {
+        case Ok(List<str> names): {
+            return names.size();
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+}
+
+str directory = "tests/cache_scratch";
+clean(directory);
+// the version constant and the project file agree
+bool has_version_line = false;
+for (str line in read_or_empty("deps").split("\n")) {
+    if (line == "version " + GRV_cache.GROVE_VERSION) {
+        has_version_line = true;
+    }
+}
+check.ok("GROVE_VERSION is the version in deps", has_version_line);
+str text = read_or_empty("tests/data/lua/grammar.json");
+match (GRV_grammar.load(text)) {
+    case Err(str reason): {
+        check.ok("lua grammar loads: " + reason, false);
+    }
+    case Ok(GRV_grammar.Grammar grammar): {
+        GRV_lang.Lang lang = GRV_lang.build(grammar);
+        check.ok("no file before", GRV_cache.load(lang, text, directory).is_none());
+        GRV_lr.Table built = GRV_cache.build_cached(lang, text, directory);
+        str hash = GRV_cache.grammar_hash(text);
+        check.ok("the file exists after the first build", fs.is_present(GRV_cache.path_for(directory, hash)));
+        check.eq_int("only the final file is left", listing(directory), 1);
+        match (GRV_cache.load(lang, text, directory)) {
+            case None: {
+                check.ok("the second load hits", false);
+            }
+            case Some(GRV_lr.Table cached): {
+                check.ok("entries equal", is_same(cached.entries, built.entries));
+                check.ok("state offsets equal", is_same(cached.state_off, built.state_off));
+                check.ok("valid sets equal", is_sets_same(cached.valid_sets, built.valid_sets) && is_same(cached.valid_id, built.valid_id));
+                check.eq_int("forks kept", cached.forks, built.forks);
+                check.eq_int("resolved kept", cached.resolved, built.resolved);
+                str source = "local t = { 1, 2; x = f(3) }\nreturn t";
+                str want = GRV_glr.parse(GRV_lexer.make(built), source).sexp();
+                str got = GRV_glr.parse(GRV_lexer.make(cached), source).sexp();
+                check.ok("the cached table parses a tree", want != "" && want == got);
+            }
+        }
+        // misses
+        str file = GRV_cache.path_for(directory, hash);
+        str good = read_or_empty(file);
+        check.ok("another hash misses", GRV_cache.decode(good, lang, "other").is_none());
+        check.ok("another version misses", GRV_cache.decode(good.split("version " + GRV_cache.GROVE_VERSION).join("version 0.0.1"), lang, hash).is_none());
+        check.ok("a truncated file misses", GRV_cache.decode(good.substr(0, good.size() / 2), lang, hash).is_none());
+        check.ok("a changed number misses", GRV_cache.decode(good.split("valid_id ").join("valid_id 1 "), lang, hash).is_none());
+        check.ok("an empty file misses", GRV_cache.decode("", lang, hash).is_none());
+        check.ok("no directory, no store", !GRV_cache.did_store(built, "", "x"));
+        // another grammar has another file
+        check.ok("grammar hashes differ", GRV_cache.grammar_hash(text) != GRV_cache.grammar_hash(text + " "));
+        // a damaged file on disk is rebuilt, and overwritten with a good one
+        match (io.write(file, "garbage")) {
+            case Ok: {
+            }
+            case Err(_): {
+                check.ok("the test file can be written", false);
+            }
+        }
+        check.ok("a damaged file misses", GRV_cache.load(lang, text, directory).is_none());
+        GRV_lr.Table again = GRV_cache.build_cached(lang, text, directory);
+        check.ok("rebuilt equals built", is_same(again.entries, built.entries));
+        check.ok("and the file is good again", GRV_cache.load(lang, text, directory).is_some());
+    }
+}
+clean(directory);
+check.finish();

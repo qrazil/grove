@@ -1,0 +1,312 @@
+/* The on-disk cache of LR tables.
+ *
+ * Building the tables of a big grammar takes seconds (SPEC 14.4, 16.3); the tables depend only on the
+ * grammar, so they are kept in a file named by the version of grove and a hash of the grammar.json text:
+ * a new grove or a changed grammar finds no file and builds. A file is written whole to a temporary name
+ * and renamed, so a reader sees all of a table or none; a file that is damaged, from another format or
+ * not matching the grammar (symbol and production counts, a checksum of every number) is a miss, never
+ * an error.
+ *
+ * Format, text: a header of `name value` lines, then one line per list of numbers.
+ *
+ *   grove-table 1
+ *   version V
+ *   hash H
+ *   shape TERMS PRODUCTIONS WIDTH FORKS REPEAT_TIES RESOLVED IS_LALR
+ *   sum CHECKSUM
+ *   state_off N v v ...
+ *   entries N v v ...
+ *   valid_id N v v ...
+ *   sets COUNT
+ *   set N v v ...        (COUNT times)
+ */
+
+import core.GRV_lang;
+import core.GRV_lr;
+import fs;
+import io;
+import os;
+import timer;
+
+/// the version of grove whose tables a file holds; tests check it against `deps`
+pub const str GROVE_VERSION = "0.6.0";
+const int FORMAT = 1;
+const int MODULUS = 1000000007;
+
+/// A hash of the text of a grammar.json: two polynomial hashes, written in hex.
+pub str grammar_hash(str text) {
+    int first = 7;
+    int second = 13;
+    for (int index in 0 .. text.size()) {
+        int code = text.byte_at(index) + 1;
+        first = (first * 131 + code) % MODULUS;
+        second = (second * 257 + code) % 998244353;
+    }
+    return hex(first) + hex(second) + hex(text.size());
+}
+
+str hex(int value) {
+    str digits = "0123456789abcdef";
+    if (value == 0) {
+        return "0";
+    }
+    str out = "";
+    int rest = value;
+    while (rest > 0) {
+        int digit = rest % 16;
+        out = digits.substr(digit, digit + 1) + out;
+        rest = rest / 16;
+    }
+    return out;
+}
+
+/// Where tables go: $GROVE_CACHE_DIR, else $XDG_CACHE_HOME/grove, else $HOME/.cache/grove, else "".
+pub str default_directory() {
+    str explicit = os.env("GROVE_CACHE_DIR").or("");
+    if (explicit != "") {
+        return explicit;
+    }
+    str xdg = os.env("XDG_CACHE_HOME").or("");
+    if (xdg != "") {
+        return fs.join(xdg, "grove");
+    }
+    str home = os.env("HOME").or("");
+    if (home != "") {
+        return fs.join(fs.join(home, ".cache"), "grove");
+    }
+    return "";
+}
+
+pub str path_for(str directory, str hash) {
+    return fs.join(directory, "grove-" + GROVE_VERSION + "-" + hash + ".tbl");
+}
+
+int checksum_of(GRV_lr.Table table) {
+    int sum = 0;
+    for (int value in table.state_off) {
+        sum = (sum * 31 + value) % MODULUS;
+    }
+    for (int value in table.entries) {
+        sum = (sum * 31 + value) % MODULUS;
+    }
+    for (int value in table.valid_id) {
+        sum = (sum * 31 + value) % MODULUS;
+    }
+    for (List<int> set in table.valid_sets) {
+        for (int value in set) {
+            sum = (sum * 31 + value) % MODULUS;
+        }
+        sum = (sum * 31 + 7) % MODULUS;
+    }
+    return sum;
+}
+
+str line_of(str name, List<int> values) {
+    List<str> parts = [name, str(values.size())];
+    for (int value in values) {
+        parts.push(str(value));
+    }
+    return parts.join(" ");
+}
+
+/// The text of a table's cache file.
+pub str encode(GRV_lr.Table table, str hash) {
+    GRV_lang.Lang lang = table.lang;
+    int lalr = 0;
+    if (table.is_lalr) {
+        lalr = 1;
+    }
+    List<str> lines = ["grove-table " + str(FORMAT), "version " + GROVE_VERSION, "hash " + hash];
+    lines.push("shape " + str(lang.term_count) + " " + str(lang.prod_lhs.size()) + " " + str(table.width) + " " + str(table.forks) + " " + str(table.repeat_ties) + " " + str(table.resolved) + " " + str(lalr));
+    lines.push("sum " + str(checksum_of(table)));
+    lines.push(line_of("state_off", table.state_off));
+    lines.push(line_of("entries", table.entries));
+    lines.push(line_of("valid_id", table.valid_id));
+    lines.push("sets " + str(table.valid_sets.size()));
+    for (List<int> set in table.valid_sets) {
+        lines.push(line_of("set", set));
+    }
+    return lines.join("\n") + "\n";
+}
+
+// the numbers of a `name N v v ...` line, or None
+Option<List<int>> numbers(str line, str name) {
+    List<str> parts = line.split(" ");
+    if (parts.size() < 2 || parts[0] != name) {
+        return Option<List<int>>.None;
+    }
+    int count = parts[1].parse_int().or(-1);
+    if (count < 0 || parts.size() != count + 2) {
+        return Option<List<int>>.None;
+    }
+    List<int> out = [];
+    for (int index in 2 .. parts.size()) {
+        match (parts[index].parse_int()) {
+            case Some(int value): {
+                out.push(value);
+            }
+            case None: {
+                return Option<List<int>>.None;
+            }
+        }
+    }
+    return Option<List<int>>.Some(out);
+}
+
+/// The table `text` holds for `lang`, or None if it is not a table of this grove for this grammar.
+pub Option<GRV_lr.Table> decode(str text, GRV_lang.Lang lang, str hash) {
+    Option<GRV_lr.Table> miss = Option<GRV_lr.Table>.None;
+    List<str> lines = text.split("\n");
+    if (lines.size() < 10 || lines[0] != "grove-table " + str(FORMAT) || lines[1] != "version " + GROVE_VERSION || lines[2] != "hash " + hash) {
+        return miss;
+    }
+    List<str> shape = lines[3].split(" ");
+    if (shape.size() != 8 || shape[0] != "shape") {
+        return miss;
+    }
+    List<int> head = [];
+    for (int index in 1 .. shape.size()) {
+        head.push(shape[index].parse_int().or(-1));
+    }
+    if (head[0] != lang.term_count || head[1] != lang.prod_lhs.size() || head[2] < 1) {
+        return miss;
+    }
+    List<str> sum_line = lines[4].split(" ");
+    if (sum_line.size() != 2 || sum_line[0] != "sum") {
+        return miss;
+    }
+    Pieces parts = Pieces();
+    match (numbers(lines[5], "state_off")) {
+        case Some(List<int> values): {
+            parts.state_off = values;
+        }
+        case None: {
+            return miss;
+        }
+    }
+    match (numbers(lines[6], "entries")) {
+        case Some(List<int> values): {
+            parts.entries = values;
+        }
+        case None: {
+            return miss;
+        }
+    }
+    match (numbers(lines[7], "valid_id")) {
+        case Some(List<int> values): {
+            parts.valid_id = values;
+        }
+        case None: {
+            return miss;
+        }
+    }
+    List<str> sets_line = lines[8].split(" ");
+    if (sets_line.size() != 2 || sets_line[0] != "sets") {
+        return miss;
+    }
+    int set_count = sets_line[1].parse_int().or(-1);
+    if (set_count < 0 || lines.size() < 9 + set_count) {
+        return miss;
+    }
+    List<List<int>> sets = [];
+    for (int index in 0 .. set_count) {
+        match (numbers(lines[9 + index], "set")) {
+            case Some(List<int> values): {
+                sets.push(values);
+            }
+            case None: {
+                return miss;
+            }
+        }
+    }
+    GRV_lr.Table table = GRV_lr.Table(lang);
+    table.width = head[2];
+    table.forks = head[3];
+    table.repeat_ties = head[4];
+    table.resolved = head[5];
+    table.is_lalr = head[6] == 1;
+    table.state_off = parts.state_off;
+    table.entries = parts.entries;
+    table.valid_id = parts.valid_id;
+    table.valid_sets = sets;
+    if (table.state_off.size() < 2 || table.state_off[table.state_off.size() - 1] != table.entries.size() || checksum_of(table) != sum_line[1].parse_int().or(-1)) {
+        return miss;
+    }
+    return Option<GRV_lr.Table>.Some(table);
+}
+
+type Pieces {
+    List<int> state_off = [];
+    List<int> entries = [];
+    List<int> valid_id = [];
+}
+
+/// Write the table of grammar `hash` into `directory`, atomically. False if the directory is unusable.
+pub bool did_store(GRV_lr.Table table, str directory, str hash) {
+    if (directory == "" || table.is_failed) {
+        return false;
+    }
+    match (fs.makedirs(directory)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    str path = path_for(directory, hash);
+    str temp = path + ".tmp" + str(timer.monotonic_ns());
+    match (io.write(temp, encode(table, hash))) {
+        case Ok: {
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    match (fs.rename(temp, path)) {
+        case Ok: {
+            return true;
+        }
+        case Err(_): {
+            match (fs.remove(temp)) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+            return false;
+        }
+    }
+}
+
+/// The cached table of the grammar with text `grammar_text`, if `directory` has a valid one.
+pub Option<GRV_lr.Table> load(GRV_lang.Lang lang, str grammar_text, str directory) {
+    Option<GRV_lr.Table> miss = Option<GRV_lr.Table>.None;
+    if (directory == "") {
+        return miss;
+    }
+    str hash = grammar_hash(grammar_text);
+    match (io.read(path_for(directory, hash))) {
+        case Ok(str text): {
+            return decode(text, lang, hash);
+        }
+        case Err(_): {
+            return miss;
+        }
+    }
+}
+
+/** The tables of `lang` (built from `grammar_text`): from the cache when there, else built and cached.
+ * Failures to read or write the cache are not errors. */
+pub GRV_lr.Table build_cached(GRV_lang.Lang lang, str grammar_text, str directory) {
+    Option<GRV_lr.Table> found = load(lang, grammar_text, directory);
+    match (found) {
+        case Some(GRV_lr.Table table): {
+            return table;
+        }
+        case None: {
+            GRV_lr.Table built = GRV_lr.build(lang);
+            did_store(built, directory, grammar_hash(grammar_text));
+            return built;
+        }
+    }
+}
