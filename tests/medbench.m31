@@ -51,6 +51,9 @@ while (backend.version(1) < 1) {
     if (took > slowest) {
         slowest = took;
     }
+    if (took > budget * 3) {
+        print("  slow tick " + str(ticks) + ": " + str(took) + " us, version " + str(backend.version(1)));
+    }
     ticks = ticks + 1;
 }
 print("ticks " + str(ticks) + " budget us " + str(budget) + " slowest later tick us " + str((slowest)) + " total us " + str((timer.monotonic_ns() - began) / 1000));
@@ -70,3 +73,17 @@ while (backend.version(1) < 2) {
     ticks = ticks + 1;
 }
 print("reparse after one edit: ticks " + str(ticks) + " us " + str((timer.monotonic_ns() - began) / 1000));
+backend.parse(2, argv[3], lines);
+ticks = 0;
+slowest = 0;
+began = timer.monotonic_ns();
+while (backend.version(2) < 1) {
+    int tick_began = timer.monotonic_ns();
+    backend.did_tick(budget);
+    int took = (timer.monotonic_ns() - tick_began) / 1000;
+    if (took > slowest) {
+        slowest = took;
+    }
+    ticks = ticks + 1;
+}
+print("second document, warm lexer: ticks " + str(ticks) + " slowest tick us " + str(slowest) + " total us " + str((timer.monotonic_ns() - began) / 1000));

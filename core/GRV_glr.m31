@@ -74,6 +74,19 @@ int Stack.push(int top_state, int under, int tree_node, bool is_extra, int scan_
     return state.size() - 1;
 }
 
+// entry `from` of `old` copied to the end of this stack under entry `under` (already in this stack)
+int Stack.copy_entry(Stack old, int from, int under) {
+    state.push(old.state[from]);
+    parent.push(under);
+    node.push(old.node[from]);
+    extra.push(old.extra[from]);
+    scan.push(old.scan[from]);
+    dirty.push(old.dirty[from]);
+    shape.push(old.shape[from]);
+    shape_other.push(old.shape_other[from]);
+    return state.size() - 1;
+}
+
 pub type Parser {
     pub GRV_lexer.Lexer lexer;
     pub GRV_tree.Tree tree;
@@ -109,6 +122,12 @@ pub type Parser {
     List<bytes> scan_states = [];
     int reuse_head = 0;
     int round_start = 0;
+    // the stack arena is rebuilt from the live versions when it grows past this many entries
+    int stack_limit = 4096;
+    pub int stack_compactions = 0;
+    /// the most work items (a lexed token with one action each, a reduction) one round has handled, and the rounds run: the unit a tick's budget is spent in
+    pub int max_round_work = 0;
+    pub int rounds_run = 0;
     pub bool is_tracing = false;
     pub List<str> trace = [];
 }
@@ -670,7 +689,44 @@ void Parser.recover() {
     next_dyn.push(0);
 }
 
+/* Entries are never freed while parsing, and a long document leaves almost all of them behind (a flat
+ * list reduces its elements away). Between rounds the arena is rebuilt from the chains of the live
+ * versions: the cost is their depth, and the arena stops growing, which also stops the doubling of its
+ * lists (a copy of every list at once, measured at 8 ms for a 1.2 MB document). */
+void Parser.compact_stack() {
+    Stack fresh = Stack();
+    Map<int, int> moved = {};
+    for (int index in 0 .. next_head.size()) {
+        List<int> chain = [];
+        int current = next_head[index];
+        while (current >= 0 && !moved.contains(current)) {
+            chain.push(current);
+            current = stack.parent[current];
+        }
+        int under = -1;
+        if (current >= 0) {
+            under = moved.get(current).or(-1);
+        }
+        int position = chain.size() - 1;
+        while (position >= 0) {
+            under = fresh.copy_entry(stack, chain[position], under);
+            moved.set(chain[position], under);
+            position = position - 1;
+        }
+        next_head[index] = moved.get(next_head[index]).or(-1);
+    }
+    stack = fresh;
+    stack_compactions = stack_compactions + 1;
+    stack_limit = stack.state.size() * 4;
+    if (stack_limit < 4096) {
+        stack_limit = 4096;
+    }
+}
+
 void Parser.round() {
+    if (stack.state.size() > stack_limit) {
+        compact_stack();
+    }
     if (is_reusing && next_head.size() == 1 && done_head < 0) {
         try_reuse();
     }
@@ -687,6 +743,10 @@ void Parser.round() {
         process(index);
         index = index + 1;
     }
+    rounds_run = rounds_run + 1;
+    if (index > max_round_work) {
+        max_round_work = index;
+    }
     if (done_head >= 0) {
         tree.root = done_head;
         is_done = true;
@@ -700,6 +760,11 @@ void Parser.round() {
 /** Run the parser for about `budget_ns` nanoseconds. Returns true when the tree is
  * complete (its root is set), false if it should be called again. At least one round
  * runs each call. */
+/// how many entries the stack arena holds now
+pub int Parser.stack_size() {
+    return stack.state.size();
+}
+
 pub bool Parser.has_finished_after(int budget_ns) {
     int began = timer.monotonic_ns();
     int rounds = 0;

@@ -329,6 +329,70 @@ pub Tree Tree.compact() {
     return fresh;
 }
 
+pub Compactor Tree.begin_compact() {
+    Tree fresh = Tree(lang);
+    fresh.text_size = text_size;
+    Compactor compactor = Compactor(this, fresh);
+    compactor.nodes.push(root);
+    compactor.next.push(0);
+    compactor.copied.push([]);
+    return compactor;
+}
+
+/** A compaction that can be done a few nodes at a time: `Tree.begin_compact` starts it, `did_step(units)`
+ * does about `units` node visits and says whether it finished; the result is `fresh`, with the same
+ * shape `compact` makes. The source must not get a new root meanwhile (the caller throws the compactor
+ * away if it does; the source arena is only ever appended to, so what it holds stays valid). */
+pub type Compactor {
+    pub Tree source;
+    pub Tree fresh;
+    pub bool is_done = false;
+    List<int> nodes = [];
+    List<int> next = [];
+    List<List<int>> copied = [];
+}
+
+pub bool Compactor.did_step(int units) {
+    int left = units;
+    while (!is_done && left > 0) {
+        left = left - 1;
+        int top = nodes.size() - 1;
+        int node = nodes[top];
+        int index = next[top];
+        if (index < source.kid_count[node]) {
+            next[top] = index + 1;
+            nodes.push(source.kids[source.kid_at[node] + index]);
+            next.push(0);
+            copied.push([]);
+        } else {
+            List<int> made = copied[top];
+            fresh.node_symbol.push(source.node_symbol[node]);
+            fresh.padding.push(source.padding[node]);
+            fresh.size.push(source.size[node]);
+            fresh.lookahead.push(source.lookahead[node]);
+            fresh.production.push(source.production[node]);
+            fresh.flags.push(source.flags[node]);
+            fresh.kid_at.push(fresh.kids.size());
+            fresh.kid_count.push(made.size());
+            fresh.repeat_depth.push(source.repeat_depth[node]);
+            for (int child in made) {
+                fresh.kids.push(child);
+            }
+            int id = fresh.node_symbol.size() - 1;
+            nodes.pop();
+            next.pop();
+            copied.pop();
+            if (nodes.size() == 0) {
+                fresh.root = id;
+                is_done = true;
+            } else {
+                copied[nodes.size() - 1].push(id);
+            }
+        }
+    }
+    return is_done;
+}
+
 int max_of(int left, int right) {
     if (left > right) {
         return left;

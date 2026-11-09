@@ -1,0 +1,57 @@
+/* Work units, not time: what one round of the parser may do, and that the stack arena stays small on a
+ * long flat document. A tick's budget is spent in rounds; if a round were unbounded, no budget would
+ * hold. (What a round costs in time is the machine's: SPEC 21.1.) */
+
+import core.GRV_glr;
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lexer;
+import core.GRV_lr;
+import core.GRV_tree;
+import io;
+import tests.GRV_check;
+
+GRV_check.Check check = GRV_check.Check();
+
+str read_or_empty(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error failure): {
+            return "";
+        }
+    }
+}
+
+match (GRV_grammar.load(read_or_empty("tests/data/json/grammar.json"))) {
+    case Err(str reason): {
+        check.ok("grammar: " + reason, false);
+    }
+    case Ok(GRV_grammar.Grammar grammar): {
+        GRV_lexer.Lexer lexer = GRV_lexer.make(GRV_lr.build(GRV_lang.build(grammar)));
+        List<str> parts = ["["];
+        int total = 20000;
+        for (int index in 0 .. total) {
+            str comma = ",";
+            if (index == total - 1) {
+                comma = "";
+            }
+            parts.push("{\"k\": " + str(index) + ", \"v\": [true, null, \"x\"]}" + comma);
+        }
+        parts.push("]");
+        str source = parts.join("\n");
+        GRV_glr.Parser parser = GRV_glr.begin(lexer, source, Option<GRV_tree.Tree>.None);
+        int calls = 0;
+        while (!parser.has_finished_after(0)) {
+            calls = calls + 1;
+        }
+        check.ok("many rounds", parser.rounds_run > total * 8);
+        check.ok("a round handles a bounded number of work items", parser.max_round_work <= 64);
+        check.ok("the stack arena was rebuilt", parser.stack_compactions > 0);
+        check.ok("and stays small", parser.stack_size() < 20000);
+        check.ok("a budget of 0 takes one batch of 8 rounds per call", calls >= parser.rounds_run / 8 - 1);
+        check.eq_int("the tree is whole", parser.tree.size[parser.tree.root] + parser.tree.padding[parser.tree.root], source.size());
+        check.finish();
+    }
+}
