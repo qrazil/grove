@@ -1,14 +1,14 @@
-json: load 0 ms, flatten 0 ms, tables 0 ms; 27 symbols, 27 productions, 42 states, 178 entries (1 KB), 0 forks, 0 resolved
-lua: load 1 ms, flatten 1 ms, tables 45 ms; 141 symbols, 195 productions, 314 states, 8273 entries (64 KB), 4 forks, 193 resolved
-c: load 3 ms, flatten 10 ms, tables 463 ms; 268 symbols, 1371 productions, 1961 states, 98643 entries (770 KB), 33 forks, 2382 resolved
-go: load 2 ms, flatten 3 ms, tables 145 ms; 212 symbols, 511 productions, 868 states, 24048 entries (187 KB), 62 forks, 200 resolved
-java: load 3 ms, flatten 6 ms, tables 450 ms; 295 symbols, 1056 productions, 1974 states, 58354 entries (455 KB), 52 forks, 2074 resolved
-javascript: load 3 ms, flatten 9 ms, tables 462 ms; 262 symbols, 1511 productions, 2429 states, 105336 entries (822 KB), 1036 forks, 1600 resolved
-python: load 2 ms, flatten 4 ms, tables 328 ms; 273 symbols, 854 productions, 1500 states, 51466 entries (402 KB), 957 forks, 330 resolved
-rust: load 3 ms, flatten 20 ms, tables 1739 ms; 344 symbols, 4178 productions, 6033 states, 218930 entries (1710 KB), 2146 forks, 1080 resolved
-typescript: load 4 ms, flatten 29 ms, tables 2533 ms; 388 symbols, 4385 productions, 8271 states, 347208 entries (2712 KB), 3800 forks, 2848 resolved
-cpp: load 7 ms, flatten 11 ms, tables 1703 ms; 564 symbols, 2288 productions, 3813 states, 215330 entries (1682 KB), 2038 forks, 5754 resolved
-sql: load 13 ms, flatten 111 ms, tables 3757 ms; 726 symbols, 6960 productions, 15380 states, 210000 entries (1640 KB), 5 forks, 251 resolved
-kotlin: load 2 ms, flatten 18 ms, tables 1148 ms; 366 symbols, 1826 productions, 2983 states, 240065 entries (1875 KB), 7451 forks, 11960 resolved
-bash: load 3 ms, flatten 28 ms, tables 2809 ms; 294 symbols, 5064 productions, 7716 states, 203000 entries (1585 KB), 3631 forks, 10538 resolved
-yaml: load 2 ms, flatten 2 ms, tables 53 ms; 298 symbols, 693 productions, 909 states, 15714 entries (122 KB), 316 forks, 6 resolved
+json: load 0 ms, flatten 0 ms, tables 1 ms; 28 symbols, 27 productions, 42 states, 178 entries (1 KB), 0 forks, 0 resolved
+lua: load 1 ms, flatten 1 ms, tables 136 ms; 142 symbols, 195 productions, 441 states, 11713 entries (91 KB), 4 forks, 386 resolved
+c: load 3 ms, flatten 10 ms, tables 2792 ms; 269 symbols, 1371 productions, 3440 states, 153525 entries (1199 KB), 24 forks, 12564 resolved
+go: load 4 ms, flatten 3 ms, tables 1450 ms; 213 symbols, 511 productions, 2435 states, 83824 entries (654 KB), 54 forks, 5696 resolved
+java: load 3 ms, flatten 7 ms, tables 2546 ms; 296 symbols, 1056 productions, 3521 states, 135453 entries (1058 KB), 84 forks, 10283 resolved
+javascript: load 4 ms, flatten 10 ms, tables 4552 ms; 263 symbols, 1511 productions, 5315 states, 265089 entries (2071 KB), 692 forks, 26612 resolved
+python: load 3 ms, flatten 5 ms, tables 2263 ms; 274 symbols, 854 productions, 3966 states, 132370 entries (1034 KB), 631 forks, 4984 resolved
+yaml: load 4 ms, flatten 3 ms, tables 207 ms; 299 symbols, 693 productions, 889 states, 14971 entries (116 KB), 163 forks, 6 resolved
+rust: load 5 ms, flatten 23 ms, tables 10516 ms; 345 symbols, 4178 productions, 5725 states, 204947 entries (1601 KB), 566 forks, 1053 resolved (LALR: LR(1) splitting exceeded its limit)
+kotlin: load 4 ms, flatten 19 ms, tables 3536 ms; 367 symbols, 1826 productions, 2354 states, 202404 entries (1581 KB), 1299 forks, 12471 resolved (LALR: LR(1) splitting exceeded its limit)
+sql: load 12 ms, flatten 122 ms, tables 12875 ms; 727 symbols, 6960 productions, 15073 states, 197195 entries (1540 KB), 4 forks, 327 resolved (LALR: LR(1) splitting exceeded its limit)
+cpp: load 10 ms, flatten 14 ms, tables 7795 ms; 565 symbols, 2288 productions, 3649 states, 204132 entries (1594 KB), 878 forks, 5795 resolved (LALR: LR(1) splitting exceeded its limit)
+bash: load 4 ms, flatten 34 ms, tables 23586 ms; 295 symbols, 5064 productions, 7406 states, 184043 entries (1437 KB), 494 forks, 10298 resolved (LALR: LR(1) splitting exceeded its limit)
+typescript: load 5 ms, flatten 33 ms, tables 21300 ms; 389 symbols, 4385 productions, 7933 states, 327062 entries (2555 KB), 1114 forks, 4550 resolved (LALR: LR(1) splitting exceeded its limit)

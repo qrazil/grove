@@ -1,0 +1,32 @@
+json: tree-sitter 4 forks (4 of them repeat shift/reduce), non-repeat 0 in 0 classes; grove 0 in 0 classes; only in grove 0 classes/0 forks; only in tree-sitter 0/0
+c: tree-sitter 162 forks (128 of them repeat shift/reduce), non-repeat 34 in 7 classes; grove 24 in 7 classes; only in grove 0 classes/0 forks; only in tree-sitter 0/0
+go: tree-sitter 102 forks (38 of them repeat shift/reduce), non-repeat 64 in 6 classes; grove 54 in 5 classes; only in grove 0 classes/0 forks; only in tree-sitter 1/1
+    only in tree-sitter: 1 R:AUX:1 | S
+java: tree-sitter 221 forks (163 of them repeat shift/reduce), non-repeat 58 in 5 classes; grove 84 in 6 classes; only in grove 1 classes/5 forks; only in tree-sitter 0/0
+    only in grove: 5 R:expression:1 | R:statement:1
+javascript: tree-sitter 171 forks (40 of them repeat shift/reduce), non-repeat 131 in 14 classes; grove 692 in 16 classes; only in grove 5 classes/396 forks; only in tree-sitter 3/22
+    only in grove: 196 R:arrow_function:4 | S
+    only in grove: 196 R:arrow_function:3 | S
+    only in grove: 2 R:_property_name:1 | R:primary_expression:1 | S
+    only in grove: 1 R:AUX:1 | R:AUX:1 | R:AUX:1
+    only in tree-sitter: 17 R:pattern:1 | S
+    only in tree-sitter: 3 R:assignment_expression:3 | R:object_assignment_pattern:3
+    only in tree-sitter: 2 R:_initializer:2 | S
+python: tree-sitter 1547 forks (161 of them repeat shift/reduce), non-repeat 1386 in 6 classes; grove 631 in 7 classes; only in grove 1 classes/2 forks; only in tree-sitter 0/0
+    only in grove: 2 R:primary_expression:1 | S
+typescript: tree-sitter 1124 forks (61 of them repeat shift/reduce), non-repeat 1063 in 47 classes; grove 1114 in 52 classes; only in grove 19 classes/190 forks; only in tree-sitter 14/387
+    only in grove: 42 R:arrow_function:3 | S
+    only in grove: 42 R:arrow_function:4 | S
+    only in grove: 36 R:accessibility_modifier:1 | R:primary_expression:1
+    only in grove: 20 R:pattern:1 | R:predefined_type:1 | R:primary_expression:1
+    only in tree-sitter: 108 R:class:3 | R:class:4
+    only in tree-sitter: 108 R:class:4 | R:class:5
+    only in tree-sitter: 37 R:object:2 | R:object_type:2
+kotlin: tree-sitter 1721 forks (171 of them repeat shift/reduce), non-repeat 1550 in 19 classes; grove 1299 in 20 classes; only in grove 4 classes/178 forks; only in tree-sitter 3/27
+    only in grove: 99 R:class_modifier:1 | R:simple_identifier:1
+    only in grove: 66 R:platform_modifier:1 | R:simple_identifier:1
+    only in grove: 11 R:_comparison_operator:1 | S
+    only in grove: 2 R:prefix_expression:2 | R:value_argument:2
+    only in tree-sitter: 9 R:receiver_type:1 | R:receiver_type:2
+    only in tree-sitter: 9 R:setter:1 | R:simple_identifier:1 | S
+    only in tree-sitter: 9 R:getter:1 | R:simple_identifier:1 | S

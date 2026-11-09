@@ -79,6 +79,7 @@ check.eq_str("a missing operand leaves an ERROR", parse_to_shape("expr", "1-"), 
 check.eq_str("an unknown character is skipped inside an ERROR", parse_to_shape("expr", "1 + 2"), "errors: (program (number) (ERROR))");
 check.eq_str("dynamic precedence picks a", parse_to_shape("dyn_a", "x;"), "(program (a))");
 check.eq_str("dynamic precedence picks b", parse_to_shape("dyn_b", "x;"), "(program (b))");
+check.eq_str("equal dynamic precedence: the tree that sorts first (rule a) wins, as ts_subtree_compare decides", parse_to_shape("dyn_tie", "x;"), "(program (a))");
 check.eq_str("fields and a comment extra between children", parse_to_shape("extras", "let a = 1; # one\nlet b = 2;"), "(program (item name: (name) (number)) (comment) (item name: (name) (number)))");
 check.eq_str("a comment before the first token", parse_to_shape("extras", "# top\nlet a = 1;"), "(program (comment) (item name: (name) (number)))");
 

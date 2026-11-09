@@ -42,46 +42,67 @@ Option<GRV_lexer.Lexer> lexer_of(str path) {
     }
 }
 
-/* Apply `steps` random edits to `source`, comparing at each step; returns the number of steps
- * whose two trees differed, and adds the token counts to `counts` = [incremental, scratch, reused nodes]. */
+/* Apply `steps` random edits to `source` and undo each one, comparing the incrementally reparsed tree with a
+ * scratch parse after both. When the edit leaves the text with a syntax error the trees may legitimately
+ * differ (recovery depends on what was reused); when it does not, and always after the undo, they must be
+ * identical. Returns the number of comparisons that failed; `counts` = [tokens read incrementally, tokens
+ * read from scratch, nodes reused, edits that broke the syntax, 0]. */
 int run(GRV_lexer.Lexer lexer, str source, int seed, int steps, int most_removed, List<str> snippets, List<int> counts) {
     Random random = Random(seed);
     GRV_tree.Tree tree = GRV_glr.parse(lexer, source);
-    str text = source;
     int mismatches = 0;
     for (int step in 0 .. steps) {
-        int start = random.next(text.size() + 1);
+        int start = random.next(source.size() + 1);
         int removed = random.next(most_removed + 1);
-        if (start + removed > text.size()) {
-            removed = text.size() - start;
+        if (start + removed > source.size()) {
+            removed = source.size() - start;
         }
-        // keep edits on character boundaries: move to the next ASCII byte
-        while (start < text.size() && (text.byte_at(start) & 192) == 128) {
+        // keep edits on character boundaries
+        while (start < source.size() && (source.byte_at(start) & 192) == 128) {
             start = start + 1;
         }
-        while (start + removed < text.size() && (text.byte_at(start + removed) & 192) == 128) {
+        while (start + removed < source.size() && (source.byte_at(start + removed) & 192) == 128) {
             removed = removed + 1;
         }
         str added = snippets[random.next(snippets.size())];
-        str changed = text.substr(0, start) + added + text.substr(start + removed, text.size());
-        GRV_edit.apply(tree, start, start + removed, start + added.size());
-        GRV_glr.Parser parser = GRV_glr.begin(lexer, changed, Option<GRV_tree.Tree>.Some(tree));
-        parser.has_finished_after(9223372036854775807);
-        GRV_glr.Parser fresh = GRV_glr.begin(lexer, changed, Option<GRV_tree.Tree>.None);
-        fresh.has_finished_after(9223372036854775807);
-        if (parser.tree.full() != fresh.tree.full() || parser.tree.has_errors() != fresh.tree.has_errors()) {
-            mismatches = mismatches + 1;
-            if (mismatches == 1) {
-                print("first mismatch at step " + str(step) + ": edit [" + str(start) + ", " + str(start + removed) + ") -> [" + added + "]");
+        str changed = source.substr(0, start) + added + source.substr(start + removed, source.size());
+        for (int direction in 0 .. 2) {
+            str before = source;
+            str after = changed;
+            int old_end = start + removed;
+            int new_end = start + added.size();
+            if (direction == 1) {
+                before = changed;
+                after = source;
+                old_end = start + added.size();
+                new_end = start + removed;
             }
+            GRV_edit.apply(tree, start, old_end, new_end);
+            GRV_glr.Parser parser = GRV_glr.begin(lexer, after, Option<GRV_tree.Tree>.Some(tree));
+            parser.has_finished_after(9223372036854775807);
+            GRV_glr.Parser fresh = GRV_glr.begin(lexer, after, Option<GRV_tree.Tree>.None);
+            fresh.has_finished_after(9223372036854775807);
+            bool is_equal = parser.tree.full() == fresh.tree.full() && parser.tree.has_errors() == fresh.tree.has_errors();
+            if (fresh.tree.has_errors()) {
+                counts[3] = counts[3] + 1;
+            } else if (!is_equal) {
+                mismatches = mismatches + 1;
+                print("mismatch at step " + str(step) + (if_undo(direction)) + ": [" + str(start) + ", " + str(old_end) + ") -> " + str(new_end));
+            }
+            counts[0] = counts[0] + parser.lexed_tokens;
+            counts[1] = counts[1] + fresh.lexed_tokens;
+            counts[2] = counts[2] + parser.reused_nodes;
+            tree = parser.tree;
         }
-        counts[0] = counts[0] + parser.lexed_tokens;
-        counts[1] = counts[1] + fresh.lexed_tokens;
-        counts[2] = counts[2] + parser.reused_nodes;
-        tree = parser.tree;
-        text = changed;
     }
     return mismatches;
+}
+
+str if_undo(int direction) {
+    if (direction == 1) {
+        return " (undo)";
+    }
+    return "";
 }
 
 str records(int count) {
@@ -104,11 +125,12 @@ void exercise(GRV_check.Check check, str name, str grammar_path, str source, int
         }
         case Some(GRV_lexer.Lexer lexer): {
             // edits that break and mend the syntax: only equality is asked
-            List<int> rough = [0, 0, 0];
+            List<int> rough = [0, 0, 0, 0, 0];
             check.eq_int(name + ": incremental equals scratch over 80 hostile edits", run(lexer, source, seed, 80, 2, hostile, rough), 0);
             check.ok(name + ": nodes were reused", rough[2] > 0);
+            check.ok(name + ": some hostile edits did break the syntax", rough[3] > 0);
             // edits that leave the syntax alone: the incremental parses must read far fewer tokens
-            List<int> calm = [0, 0, 0];
+            List<int> calm = [0, 0, 0, 0, 0];
             check.eq_int(name + ": incremental equals scratch over 60 benign edits", run(lexer, source, seed + 1, 60, 0, benign, calm), 0);
             check.ok(name + ": benign edits read under a third of the tokens", calm[0] * 3 < calm[1]);
             // the arena keeps old versions; compaction gives them back without changing the tree

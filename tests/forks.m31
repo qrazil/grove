@@ -1,0 +1,50 @@
+/* Print the forks of the tables built for a grammar, one signature per line with its
+ * count, for comparison with the multi-action entries of tree-sitter's parser.c
+ * (experiments/ts_forks.py prints the same from parser.c).
+ *
+ *   forks GRAMMAR.json
+ */
+
+import core.GRV_grammar;
+import core.GRV_lang;
+import core.GRV_lr;
+import io;
+import os;
+
+List<str> argv = os.arguments();
+if (argv.size() < 2) {
+    print("usage: forks GRAMMAR.json");
+    os.exit(2);
+}
+match (io.read(argv[1])) {
+    case Err(io.Error failure): {
+        print("unreadable");
+    }
+    case Ok(str text): {
+        match (GRV_grammar.load(text)) {
+            case Err(str reason): {
+                print(reason);
+            }
+            case Ok(GRV_grammar.Grammar grammar): {
+                GRV_lr.Table table = GRV_lr.build(GRV_lang.build(grammar));
+                Map<str, int> counts = {};
+                for (str signature in table.fork_log) {
+                    counts.set(signature, counts.get(signature).or(0) + 1);
+                }
+                if (argv.size() > 2) {
+                    for (int index in 0 .. table.fork_log.size()) {
+                        if (table.fork_log[index].contains(argv[2])) {
+                            print("  at " + table.fork_where[index] + ": " + table.fork_log[index]);
+                        }
+                    }
+                }
+                List<str> keys = counts.keys();
+                keys.sort();
+                for (str key in keys) {
+                    print(str(counts.get(key).or(0)) + " " + key);
+                }
+                print("forks " + str(table.forks) + " repeat ties resolved " + str(table.repeat_ties) + " precedence resolved " + str(table.resolved));
+            }
+        }
+    }
+}

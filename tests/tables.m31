@@ -18,6 +18,13 @@ int millis(int from_ns) {
     return (timer.monotonic_ns() - from_ns) / 1000000;
 }
 
+str lalr_note(GRV_lr.Table table) {
+    if (table.is_lalr) {
+        return " (LALR: LR(1) splitting exceeded its limit)";
+    }
+    return "";
+}
+
 List<str> argv = os.arguments();
 if (argv.size() < 2) {
     print("usage: tables GRAMMAR.json [GRAMMAR.json ...]");
@@ -42,7 +49,7 @@ for (int index in 1 .. argv.size()) {
                     int building = timer.monotonic_ns();
                     GRV_lr.Table table = GRV_lr.build(lang);
                     int built = millis(building);
-                    print(grammar.name + ": load " + str(loaded) + " ms, flatten " + str(flattened) + " ms, tables " + str(built) + " ms; " + str(lang.symbol_name.size()) + " symbols, " + str(lang.prod_lhs.size()) + " productions, " + str(table.state_count()) + " states, " + str(table.entries.size()) + " entries (" + str(table.entries.size() * 8 / 1024) + " KB), " + str(table.forks) + " forks, " + str(table.resolved) + " resolved");
+                    print(grammar.name + ": load " + str(loaded) + " ms, flatten " + str(flattened) + " ms, tables " + str(built) + " ms; " + str(lang.symbol_name.size()) + " symbols, " + str(lang.prod_lhs.size()) + " productions, " + str(table.state_count()) + " states, " + str(table.entries.size()) + " entries (" + str(table.entries.size() * 8 / 1024) + " KB), " + str(table.forks) + " forks, " + str(table.resolved) + " resolved" + lalr_note(table));
                 }
             }
         }

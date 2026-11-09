@@ -35,3 +35,5 @@ c	tests/oracle/fixtures/c/micro/s.c
 c	tests/oracle/fixtures/c/micro/t.c
 c	tests/oracle/fixtures/c/micro/u.c
 c	tests/oracle/fixtures/c/micro/v.c
+c	tests/oracle/fixtures/c/micro/resolve.c
+c	tests/oracle/fixtures/c/micro/macro_comment.c

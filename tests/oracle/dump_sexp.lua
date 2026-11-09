@@ -39,7 +39,7 @@ local function walk(node, out, depth, field)
   out[first] = prefix .. "(" .. node:type() .. range
   local has_child = false
   for child, name in node:iter_children() do
-    if child:named() then
+    if child:named() or child:missing() then
       has_child = true
       walk(child, out, depth + 1, name)
     end
