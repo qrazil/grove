@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0 (conflict resolution, table cache)
+
+- Versions of the GLR parser merge when their stacks have the same shape (states, error marks, scanner
+  state), and the survivor is chosen on the entries above the shared part, also when a reduction lands
+  on a waiting version. Before, alternative readings of one statement were kept side by side until the
+  16-version cap dropped the better one. Many-file oracle on C: 92 identical / 17 different became
+  109 / 0; query captures on C 109/109. A blank-only text has an empty root padded by the blank.
+- A rule listed in `precedences` takes that named precedence in shift/reduce conflicts (not in
+  reduce/reduce): JavaScript forks 692 to 283, the `arrow_function | S` classes are gone; Python's
+  extra and missing classes 6+8 became 2+0.
+- `GRV_cache`: versioned (grove version, hash of the grammar.json text), checksummed, atomically written
+  table cache; javascript 4.2 s to 0.09 s, bash 29 s to 0.06 s. `GROVE_CACHE_DIR` / `XDG_CACHE_HOME` /
+  `~/.cache/grove`.
+- Tried and removed: a narrower LR(1) conflict mask (rust and bash exact but 59 566 and 13 223 states) and
+  none-below-zero precedence ordering. SPEC section 19.
+- Tests: `t_cache` (20). Release checklist: `GRV_cache.GROVE_VERSION` must equal the `deps` version
+  (`t_cache` checks it).
+
 ## 0.5.0 (queries, subset Q0)
 
 - `GRV_query`: parse and run tree-sitter queries over the visible tree: patterns, fields, negated

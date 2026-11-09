@@ -1372,13 +1372,8 @@ JSON stays at 990 of 990.
 
 ### 16.4 What is still different
 
-- The extra classes of JavaScript/TypeScript/Kotlin forks (`arrow_function | S`, `object |
-  statement_block`, `class_modifier | simple_identifier`) are cases where grove keeps a fork
-  and tree-sitter resolves, or the other way round; the rule behind them is not found. The
-  first suspects are tree-sitter's treatment of named precedences across the lists and its
-  per-production precedence being the *maximum* over steps rather than the last step's.
-- 3 C files differ (`sized_type_specifier` extent twice, a `preproc_def` extent once); they
-  reproduce only in the whole file, not in any excerpt tried.
+- (0.6.0: the arrow_function classes are explained, see section 19.2; the 3 C files are explained and
+  fixed, see 19.1.) The classes that remain for Kotlin and TypeScript are listed in 19.2.
 - The LR(1) splitting multiplies states on grammars with many conflict terminals (rust:
   59 519 states; tree-sitter 3 649). The limit above falls back to LALR; the better fix is
   a smaller mask (terminals whose conflicts are resolved by precedence, not those that stay
@@ -1522,3 +1517,78 @@ non-terminal around it; otherwise the rule itself is the terminal. 0.4.0 made th
 fixed the table fixture but dropped the child, and the query oracle found it (10 of 299 Lua files missed
 `punctuation.delimiter` on a statement `;`). `GRV_lang.build` now notes every token written inline before
 it assigns terminals.
+
+## 19. Conflict resolution, second round, and the table cache (version 0.6.0)
+
+### 19.1 Versions that never met (the three C files, and more)
+
+The three C files of section 16 were not a precedence problem. Two readings of the same text, for
+instance `free(p);` as a call or as a `macro_type_specifier` followed by `;` (dynamic precedence -1), or
+`sizeof(z)` as an expression or as a type, were kept as separate versions of the parser, because versions
+merged only when the stack entry under their top was the very same entry. A second statement made the
+two readings of the first one into four versions, and with three `free(p);` in a row the 16-version cap
+dropped the better reading. 0.6.0 changes three things:
+
+- two versions at the same position merge when their stacks have the same shape: the same states from
+  the bottom, errors in the same entries (two polynomial hashes kept per stack entry) and the same scanner
+  state. This is the effect of tree-sitter's graph-structured stack, which links such stacks into one;
+- which of two merged versions survives is decided on the entries just above the shared part of the two
+  stacks (the alternative readings), with the dynamic precedence and then `ts_subtree_compare` as in
+  `ts_parser__select_tree`; and a reduction that lands in the shape of a version already waiting in the
+  same round is compared when it is made, which is where tree-sitter calls `select_children`. Without that,
+  `sizeof(z)` was decided by comparing the next token;
+- a text that is only blank has an empty root padded by the blank (tree-sitter: `1-1`, not `0-1`).
+
+Measured on 300 C files (`report.sh`, 109 comparable): **before 92 identical, 17 different; after 109 and
+0**. Query captures on the same files 109 of 109 identical (were 93 + 3 in 0.5.0). Lua 399/400 and json
+284/284 as before.
+
+### 19.2 A rule listed in `precedences` is a named precedence
+
+The JavaScript fork class `arrow_function:3 | S` (196 forks, with `:4`) came from this: the first list of
+`precedences` in tree-sitter-javascript ends with `$.update_expression ... $.sequence_expression,
+$.arrow_function`, rule names, not strings. tree-sitter lets a rule name stand in a list, and the
+productions of that rule then compete under that name. Grove now gives the items of a listed rule the
+named precedence of the rule (unless they carry an explicit named one) **in shift/reduce conflicts**. In
+reduce/reduce conflicts it must not: trying it removed forks tree-sitter keeps (`pattern | primary_expression`).
+The rest is by experiment against parser.c (`experiments/compare_forks.sh`; forks, with classes only on
+one side):
+
+| grammar | tree-sitter forks (non-repeat) | grove before | grove now | only in grove / only in tree-sitter |
+|---|--:|--:|--:|---|
+| javascript | 131 | 692 | 283 | 3 classes (5 forks) / 3 classes (22 forks) |
+| python | 1 386 | 606 | 631 | 1 class (2) / 0 |
+| c | 34 | 24 | 24 | none / none |
+| go | 64 | 54 | 54 | none / 1 repeat class (1) |
+
+What still differs in JavaScript: tree-sitter keeps 17 `pattern | shift`, 3 `assignment_expression |
+object_assignment_pattern` and 2 `_initializer | shift` forks (declared conflicts) that grove resolves, and
+grove keeps 3 `expression | shift`. A no-precedence versus integer-0 ordering (none < 0, from the order of
+the Rust enum) was tried and removed: it fixed the arrow classes by accident and broke the reduce/reduce
+cases. TypeScript, Kotlin and the other LALR-fallback grammars still show their old extra classes; they
+are compared against LALR tables, which have spurious forks of their own.
+
+### 19.3 The narrower conflict mask: tried, not kept
+
+Restricting the LR(1) split to terminals whose conflicting states carry a precedence, an associativity or a
+listed rule (only those can be resolved wrongly by LALR) did make rust and bash exact within the limit, but
+at 59 566 and 13 223 states against tree-sitter's few thousand, 11.5 and 2.9 MB of table and no gain on
+typescript, cpp, kotlin or sql, which still overflow. It was removed. The cause is that identity is by
+masked lookahead sets, so states split once per distinct subset; the useful fix is Pager's weak
+compatibility during construction, merging a new state into an old one of the same core whenever no
+conflict can appear, instead of splitting first and merging after. That is not done; the six big grammars
+stay on LALR (flag `is_lalr`), and the cache below makes that a one-time cost.
+
+### 19.4 The table cache (`GRV_cache`)
+
+`GRV_cache.build_cached(lang, grammar_text, directory)` returns the tables from a file named
+`grove-VERSION-HASH.tbl` when there is a valid one and otherwise builds and writes them. HASH is two
+polynomial hashes and the length of the grammar.json text; VERSION is `GROVE_VERSION` (a test compares it
+with `deps`). The file is text (one line of numbers per array) with a header that repeats version and
+hash, the counts of terminals and productions, and a checksum over every number; any mismatch, truncation
+or damage is a miss, never an error, and the table is rebuilt and the file replaced. A file is written to
+`NAME.tmpNANOSECONDS` and renamed (`fs.rename`), so a reader sees a whole file or none. The directory is
+`$GROVE_CACHE_DIR`, else `$XDG_CACHE_HOME/grove`, else `$HOME/.cache/grove`; an unusable directory means no
+cache, not a failure. Measured (m31 -O2): javascript 4 165 ms to build, 91 to 95 ms to read (2.0 MB);
+bash 29 440 ms (the LALR fallback, with the failed attempt) and 63 ms (2.9 MB). The fork log is not cached
+(diagnostics only). Not done: a size limit or cleaning of old versions' files; a binary format.
