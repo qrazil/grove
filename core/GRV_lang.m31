@@ -185,17 +185,15 @@ int Lang.lex_precedence(int outer, int core) {
 // the terminal id of token node `core` (registering it); `rule_name` names it if the whole rule is that token
 int Lang.terminal(int outer, int core, str rule_name) {
     int type_kind = grammar.kind[core];
+    /* A rule that is just a token and the same token written inline are two terminals: Lua's
+     * `empty_statement: ';'` is a node, the `;` between the fields of a table is not (checked against
+     * tree-sitter). */
     str token_key = key(core);
+    if (rule_name != "") {
+        token_key = token_key + "@" + rule_name;
+    }
     match (terminal_ids.get(token_key)) {
         case Some(int known): {
-            if (rule_name != "" && !is_named(known)) {
-                symbol_name[known] = rule_name;
-                int upgraded = symbol_flags[known] - symbol_flags[known] % 4 + F_NAMED;
-                if (!rule_name.starts_with("_")) {
-                    upgraded = upgraded + F_VISIBLE;
-                }
-                symbol_flags[known] = upgraded;
-            }
             return known;
         }
         case None: {

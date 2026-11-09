@@ -1,0 +1,13 @@
+/* The scanners grove has, by the name of the grammar. */
+
+import core.GRV_scan;
+import core.GRV_scan_lua;
+
+/// The external scanner for the grammar called `name`, if grove has one.
+pub Option<GRV_scan.Scanner> for_language(str name) {
+    if (name == "lua") {
+        GRV_scan.Scanner lua = GRV_scan_lua.LuaScanner();
+        return Option<GRV_scan.Scanner>.Some(lua);
+    }
+    return Option<GRV_scan.Scanner>.None;
+}

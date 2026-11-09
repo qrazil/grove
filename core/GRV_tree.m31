@@ -23,6 +23,8 @@ pub const int FLAG_CHANGED = 2;
 pub const int FLAG_FRAGILE = 4;
 pub const int FLAG_ERROR = 8;
 pub const int FLAG_HAS_ERROR = 16;
+pub const int FLAG_HAS_EXTERNAL = 32;
+pub const int FLAG_ENDS_OPEN = 64;
 
 pub type Tree {
     pub GRV_lang.Lang lang;
@@ -125,6 +127,7 @@ int Tree.build(int symbol, int prod, List<int> children, int node_flags, int red
     int whole = 0;
     int last_window = 0;
     int all_flags = node_flags;
+    bool is_open = false;
     for (int child in children) {
         whole = whole + padding[child] + size[child];
         last_window = lookahead[child];
@@ -133,9 +136,24 @@ int Tree.build(int symbol, int prod, List<int> children, int node_flags, int red
                 all_flags = all_flags + FLAG_HAS_ERROR;
             }
         }
+        if (has_flag(child, FLAG_HAS_EXTERNAL)) {
+            if (!has_flag_in(all_flags, FLAG_HAS_EXTERNAL)) {
+                all_flags = all_flags + FLAG_HAS_EXTERNAL;
+            }
+            is_open = has_flag(child, FLAG_ENDS_OPEN);
+        }
+    }
+    if (is_open && !has_flag_in(all_flags, FLAG_ENDS_OPEN)) {
+        all_flags = all_flags + FLAG_ENDS_OPEN;
     }
     if (children.size() > 0) {
         first_padding = padding[children[0]];
+        /* as in tree-sitter, a node is fragile if its first or last child is (an ERROR counts) */
+        int first_child = children[0];
+        int last_child = children[children.size() - 1];
+        if (!has_flag_in(all_flags, FLAG_FRAGILE) && (has_flag(first_child, FLAG_FRAGILE) || has_flag(first_child, FLAG_ERROR) || has_flag(last_child, FLAG_FRAGILE) || has_flag(last_child, FLAG_ERROR))) {
+            all_flags = all_flags + FLAG_FRAGILE;
+        }
     }
     int window = last_window;
     if (reduce_lookahead > window) {

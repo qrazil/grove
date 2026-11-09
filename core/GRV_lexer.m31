@@ -29,6 +29,8 @@
 import core.GRV_lang;
 import core.GRV_lr;
 import core.GRV_regex;
+import core.GRV_scan;
+import core.GRV_scanners;
 
 const int ROW = 128;
 const int WIDE_SPAN = 2097152;
@@ -41,6 +43,8 @@ pub type Lexer {
     pub int token_start = 0;
     pub int token_end = 0;
     pub int token_examined = 0;
+    pub bool has_external_token = false;
+    pub Option<GRV_scan.Scanner> scanner = Option<GRV_scan.Scanner>.None;
     pub int dfa_states = 0;
     List<int> term_start = [];
     List<List<int>> sets = [];
@@ -52,6 +56,7 @@ pub type Lexer {
     List<int> is_skip_state = [];
     List<int> nfa_owner = [];
     Map<int, List<int>> hubs = {};
+    Map<int, List<bool>> externals_cache = {};
     Map<int, int> wide = {};
     Map<str, int> set_ids = {};
     Map<int, int> starts = {};
@@ -263,11 +268,120 @@ bool Lexer.is_skip_step(int state, int code_point) {
     return wide.get(-(state * WIDE_SPAN + code_point) - 1).or(0) == 1;
 }
 
+// the external tokens valid for the set `valid`, as the scanner wants them (empty if there are none)
+List<bool> Lexer.externals_of(int valid) {
+    match (externals_cache.get(valid)) {
+        case Some(List<bool> known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    List<bool> flags = [];
+    bool is_any = false;
+    for (int index in 0 .. lang.grammar.externals.size()) {
+        flags.push(false);
+    }
+    for (int term in table.valid_sets[valid]) {
+        if (lang.has_flag(term, GRV_lang.F_EXTERNAL)) {
+            flags[term - lang.external_base] = true;
+            is_any = true;
+        }
+    }
+    if (!is_any) {
+        flags = [];
+    }
+    externals_cache.set(valid, flags);
+    return flags;
+}
+
+// try the external scanner; true if it produced the token
+bool Lexer.can_scan_external(str text, int from, int valid) {
+    match (scanner) {
+        case None: {
+            return false;
+        }
+        case Some(GRV_scan.Scanner active): {
+            List<bool> flags = externals_of(valid);
+            if (flags.size() == 0) {
+                return false;
+            }
+            GRV_scan.ScanLexer reader = GRV_scan.ScanLexer(text);
+            reader.position = from;
+            reader.token_start = from;
+            reader.farthest = from;
+            int index = active.scan(reader, flags);
+            if (index < 0) {
+                return false;
+            }
+            token_term = lang.external_base + index;
+            token_start = reader.token_start;
+            token_end = reader.token_end();
+            token_examined = reader.farthest;
+            has_external_token = true;
+            return true;
+        }
+    }
+}
+
+/// Put the scanner (if the grammar has one) back in a state saved earlier; an empty state is the initial one.
+pub void Lexer.restore_scanner(bytes state) {
+    match (scanner) {
+        case None: {
+        }
+        case Some(GRV_scan.Scanner active): {
+            active.restore(state);
+        }
+    }
+}
+
+/// The scanner's state now, to be kept with the token it just produced.
+pub bytes Lexer.save_scanner() {
+    match (scanner) {
+        case None: {
+            bytes none = [];
+            return none;
+        }
+        case Some(GRV_scan.Scanner active): {
+            return active.save();
+        }
+    }
+}
+
+/// Is `state` the scanner's initial state (or is there no scanner).
+pub bool Lexer.is_scanner_at_rest(bytes state) {
+    match (scanner) {
+        case None: {
+            return true;
+        }
+        case Some(GRV_scan.Scanner active): {
+            bytes empty = [];
+            active.restore(empty);
+            bytes initial = active.save();
+            active.restore(state);
+            bytes now = active.save();
+            if (initial.size() != now.size()) {
+                return false;
+            }
+            for (int index in 0 .. initial.size()) {
+                if (initial[index] != now[index]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+}
+
 /** Lex one token at byte `from` for a parse state whose valid set is `valid`.
  * Sets token_term (0 at the end of input, -1 if nothing matches), token_start,
  * token_end, and token_examined: the end of the last character the lexer looked at,
  * which a later edit must not touch if the token is to be reused. */
 pub void Lexer.scan(str text, int from, int valid) {
+    has_external_token = false;
+    if (can_scan_external(text, from, valid)) {
+        return;
+    }
     int size = text.size();
     int state = start_state(valid);
     int token_from = from;
@@ -297,6 +411,14 @@ pub void Lexer.scan(str text, int from, int valid) {
         }
     }
     token_examined = examined;
+    int empty_term = accept[start_state(valid)];
+    if (best < 0 && empty_term >= 0 && !lang.has_flag(empty_term, GRV_lang.F_EXTRA)) {
+        // a token that matches the empty string (Lua's comment content after `--`) is a token of no width
+        token_term = empty_term;
+        token_start = from;
+        token_end = from;
+        return;
+    }
     if (best >= 0) {
         token_term = best;
         token_start = token_from;
@@ -344,6 +466,7 @@ pub Lexer make(GRV_lr.Table table) {
             lexer.term_start.push(-1);
         }
     }
+    lexer.scanner = GRV_scanners.for_language(lang.grammar.name);
     for (int i in 0 .. lexer.nfa.kind.size()) {
         lexer.mark.push(0);
         lexer.is_skip_state.push(0);

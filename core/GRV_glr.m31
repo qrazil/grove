@@ -40,9 +40,17 @@ type Stack {
     List<int> parent = [];
     List<int> node = [];
     List<int> extra = [];
+    List<int> scan = [];
+    List<int> dirty = [];
 }
 
-int Stack.push(int top_state, int under, int tree_node, bool is_extra) {
+int Stack.push(int top_state, int under, int tree_node, bool is_extra, int scan_index) {
+    int is_dirty = 0;
+    if (under >= 0) {
+        is_dirty = dirty[under];
+    }
+    dirty.push(is_dirty);
+    scan.push(scan_index);
     state.push(top_state);
     parent.push(under);
     node.push(tree_node);
@@ -86,6 +94,11 @@ pub type Parser {
     List<int> cursor_node = [];
     List<int> cursor_position = [];
     List<int> cursor_index = [];
+    List<bytes> scan_states = [];
+    int reuse_head = 0;
+    int round_start = 0;
+    pub bool is_tracing = false;
+    pub List<str> trace = [];
 }
 
 // the goto state of `state` on non-terminal `symbol`, or -1
@@ -138,11 +151,18 @@ int Parser.reduce(int head, int production, int position, int examined, bool is_
         node_flags = node_flags + GRV_tree.FLAG_FRAGILE;
     }
     int node_end = position - trailing_total;
+    if (!is_fragile && stack.dirty[head] == 1 && !has_fragile_flag(node_flags)) {
+        node_flags = node_flags + GRV_tree.FLAG_FRAGILE;
+    }
     int node = tree.add_node(lhs, production, children, node_flags, examined - node_end);
     int target = goto_state(stack.state[current], lhs);
-    int top = stack.push(target, current, node, is_extra);
+    int scan_index = stack.scan[head];
+    int top = stack.push(target, current, node, is_extra, scan_index);
     for (int extra_node in trailing) {
-        top = stack.push(target, top, extra_node, true);
+        top = stack.push(target, top, extra_node, true, scan_index);
+        if (tree.has_flag(extra_node, GRV_tree.FLAG_ERROR)) {
+            stack.dirty[top] = 1;
+        }
     }
     return top;
 }
@@ -244,6 +264,20 @@ int Parser.accept(int head) {
 }
 
 void Parser.note_dead(int head, int position, int term, int start, int stop, int examined) {
+    if (is_tracing) {
+        trace.push("stuck in state " + str(stack.state[head]) + " at " + str(start) + " token " + str(term));
+    }
+    /* The nodes reduced for this very lookahead led to a state that has no action on it, so the table
+     * reduced on a token it cannot accept (merged states accept some invalid lookaheads and find out
+     * one step later). Those nodes are not to be trusted when the text changes: fragile. */
+    int entry = head;
+    while (entry >= round_start) {
+        int built = stack.node[entry];
+        if (built >= 0 && tree.node_symbol[built] >= table.lang.term_count && !tree.has_flag(built, GRV_tree.FLAG_FRAGILE)) {
+            tree.flags[built] = tree.flags[built] + GRV_tree.FLAG_FRAGILE;
+        }
+        entry = stack.parent[entry];
+    }
     if (dead_head < 0 || start > dead_start) {
         dead_head = head;
         dead_position = position;
@@ -263,6 +297,7 @@ void Parser.process(int index) {
     int position = work_position[index];
     int dyn = work_dyn[index];
     int state = stack.state[head];
+    lexer.restore_scanner(scan_states[stack.scan[head]]);
     lexer.scan(text, position, table.valid_id[state]);
     lexed_tokens = lexed_tokens + 1;
     int term = lexer.token_term;
@@ -282,11 +317,21 @@ void Parser.process(int index) {
     if (actions_end == found) {
         if (term > 0 && lang.has_flag(term, GRV_lang.F_EXTRA)) {
             int leaf = tree.add_token(term, start - position, stop - start, examined - stop, GRV_tree.FLAG_EXTRA);
-            queue_next(stack.push(state, head, leaf, true), stop, dyn);
+            queue_next(stack.push(state, head, leaf, true, stack.scan[head]), stop, dyn);
         } else {
             note_dead(head, position, term, start, stop, examined);
         }
         return;
+    }
+    int shift_scan = stack.scan[head];
+    int leaf_flags = 0;
+    if (lexer.has_external_token) {
+        scan_states.push(lexer.save_scanner());
+        shift_scan = scan_states.size() - 1;
+        leaf_flags = GRV_tree.FLAG_HAS_EXTERNAL;
+        if (!lexer.is_scanner_at_rest(scan_states[shift_scan])) {
+            leaf_flags = leaf_flags + GRV_tree.FLAG_ENDS_OPEN;
+        }
     }
     bool is_fragile = actions_end - found > 1 || work_head.size() - index - 1 + next_head.size() > 0;
     for (int action_index in found .. actions_end) {
@@ -294,8 +339,8 @@ void Parser.process(int index) {
         int kind = action % 4;
         int argument = action / 4;
         if (kind == GRV_lr.SHIFT) {
-            int leaf = tree.add_token(term, start - position, stop - start, examined - stop, 0);
-            queue_next(stack.push(argument, head, leaf, false), stop, dyn);
+            int leaf = tree.add_token(term, start - position, stop - start, examined - stop, leaf_flags);
+            queue_next(stack.push(argument, head, leaf, false, shift_scan), stop, dyn);
             if (stop > furthest) {
                 furthest = stop;
             }
@@ -313,8 +358,6 @@ void Parser.process(int index) {
         }
     }
 }
-
-// ---------------------------------------------------------------- reuse
 
 // the end of the cursor's node, and moving on to the next sibling (or the parent's)
 void Parser.cursor_advance() {
@@ -379,7 +422,7 @@ int Parser.single_action_argument(int state, int term) {
 
 // may the unchanged old `node`, starting where the parser is, be pushed whole in `state`
 bool Parser.can_reuse(int node, int position, int state) {
-    if (tree.has_flag(node, GRV_tree.FLAG_CHANGED) || tree.has_flag(node, GRV_tree.FLAG_FRAGILE) || tree.has_flag(node, GRV_tree.FLAG_ERROR) || tree.has_flag(node, GRV_tree.FLAG_HAS_ERROR)) {
+    if (tree.has_flag(node, GRV_tree.FLAG_ENDS_OPEN) || tree.has_flag(node, GRV_tree.FLAG_CHANGED) || tree.has_flag(node, GRV_tree.FLAG_FRAGILE) || tree.has_flag(node, GRV_tree.FLAG_ERROR) || tree.has_flag(node, GRV_tree.FLAG_HAS_ERROR)) {
         return false;
     }
     GRV_lang.Lang lang = table.lang;
@@ -405,6 +448,7 @@ bool Parser.can_reuse(int node, int position, int state) {
             return false;
         }
     }
+    lexer.restore_scanner(scan_states[stack.scan[reuse_head]]);
     lexer.scan(text, position, table.valid_id[state]);
     lexed_tokens = lexed_tokens + 1;
     return lexer.token_term == leaf_symbol && lexer.token_start == position + tree.padding[leaf] && lexer.token_end - lexer.token_start == tree.size[leaf];
@@ -449,6 +493,10 @@ void Parser.try_reuse() {
     int position = next_position[0];
     while (true) {
         int state = stack.state[head];
+        reuse_head = head;
+        if (!lexer.is_scanner_at_rest(scan_states[stack.scan[head]])) {
+            break;
+        }
         int node = reuse_candidate(position, state);
         if (node < 0) {
             break;
@@ -468,8 +516,11 @@ void Parser.try_reuse() {
         if (symbol >= table.lang.term_count) {
             target = goto_state(state, symbol);
         }
-        head = stack.push(target, head, node, is_extra);
+        head = stack.push(target, head, node, is_extra, stack.scan[head]);
         position = position + tree.total(node);
+        if (is_tracing) {
+            trace.push("reuse symbol " + str(symbol) + " at " + str(position) + " total " + str(tree.total(node)) + " state " + str(state) + " -> " + str(target) + " flags " + str(tree.flags[node]));
+        }
         reused_nodes = reused_nodes + 1;
         reused_bytes = reused_bytes + tree.total(node);
         cursor_advance();
@@ -478,12 +529,12 @@ void Parser.try_reuse() {
     next_position[0] = position;
 }
 
-// ---------------------------------------------------------------- recovery
-
 // wrap `children` in an ERROR node (an extra) and push it on `under`
 int Parser.push_error(int under, List<int> children, int under_state) {
     int node = tree.add_node(table.lang.error_symbol, -1, children, GRV_tree.FLAG_EXTRA + GRV_tree.FLAG_ERROR, 0);
-    return stack.push(under_state, under, node, true);
+    int entry = stack.push(under_state, under, node, true, stack.scan[under]);
+    stack.dirty[entry] = 1;
+    return entry;
 }
 
 void Parser.recover() {
@@ -545,12 +596,11 @@ void Parser.recover() {
     next_dyn.push(0);
 }
 
-// ---------------------------------------------------------------- driving
-
 void Parser.round() {
     if (is_reusing && next_head.size() == 1 && done_head < 0) {
         try_reuse();
     }
+    round_start = stack.state.size();
     work_head = next_head;
     work_position = next_position;
     work_dyn = next_dyn;
@@ -589,6 +639,16 @@ pub bool Parser.has_finished_after(int budget_ns) {
     return true;
 }
 
+bool has_fragile_flag(int node_flags) {
+    return (node_flags / GRV_tree.FLAG_FRAGILE) % 2 == 1;
+}
+
+// ---------------------------------------------------------------- reuse
+
+// ---------------------------------------------------------------- recovery
+
+// ---------------------------------------------------------------- driving
+
 /** A parser for `source`. With `old` (a tree whose root went through GRV_edit.apply
  * for every change since the text it describes), unchanged parts of it are reused,
  * and the new tree is a new root in the same arena. */
@@ -612,7 +672,8 @@ pub Parser begin(GRV_lexer.Lexer lexer, str source, Option<GRV_tree.Tree> old) {
         parser.cursor_position.push(0);
         parser.cursor_index.push(0);
     }
-    int base = parser.stack.push(0, -1, -1, false);
+    parser.scan_states.push([]);
+    int base = parser.stack.push(0, -1, -1, false, 0);
     parser.next_head.push(base);
     parser.next_position.push(0);
     parser.next_dyn.push(0);

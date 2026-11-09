@@ -1,0 +1,100 @@
+/* External scanners.
+ *
+ * Many tree-sitter grammars hand part of their lexing to code (`scanner.c`): the offside rule of
+ * Python, heredocs, Lua's long brackets. grove cannot run that code, so each scanner it needs is
+ * rewritten by hand in m31 as a type with three methods, `Scanner`. The lexer calls `scan` before its
+ * own automaton whenever the parse state accepts at least one external token, with the set of
+ * external tokens that are valid (`valid[i]` is true for the i-th entry of the grammar's
+ * `externals`). A scanner that recognises one returns its index; otherwise it returns -1 and the lexer
+ * goes on from where it started.
+ *
+ * `ScanLexer` is tree-sitter's TSLexer: `lookahead` (0 at the end), `advance`, `mark_end`. Characters
+ * consumed with `advance(false)` belong to the token, characters passed with `advance(true)` are
+ * padding before it. The token ends at the last `mark_end`, or where the scanner stopped if it never
+ * called it; looking past the mark is allowed and is how a scanner peeks.
+ *
+ * A scanner's state is a few bytes, saved after every external token (`save`) and put back before
+ * the next scan on the same stack (`restore`), so that forks and reuse see the state that belonged to
+ * their position. A scanner that is still in its initial state after `restore` of an empty byte
+ * string is "at rest": only then may an old subtree be reused. */
+
+pub interface Scanner {
+    /** Try to produce one of the valid external tokens at the lexer's position; its index, or -1. */
+    int scan(ScanLexer lexer, List<bool> valid);
+    /// The scanner's state as bytes (at most 1024).
+    bytes save();
+    /// Put a state back; an empty one is the initial state.
+    void restore(bytes state);
+}
+
+pub type ScanLexer {
+    pub str text;
+    pub int position = 0;
+    pub int token_start = 0;
+    pub int marked_end = -1;
+    pub int farthest = 0;
+}
+
+/// The code point at the lexer's position, 0 at the end of the text.
+pub int ScanLexer.lookahead() {
+    if (position >= text.size()) {
+        return 0;
+    }
+    int lead = text.byte_at(position);
+    if (lead < 128) {
+        return lead;
+    }
+    int length = 2;
+    int value = lead & 31;
+    if (lead >= 240) {
+        length = 4;
+        value = lead & 7;
+    } else if (lead >= 224) {
+        length = 3;
+        value = lead & 15;
+    }
+    for (int index in 1 .. length) {
+        value = value * 64 + (text.byte_at(position + index) & 63);
+    }
+    return value;
+}
+
+pub bool ScanLexer.is_at_end() {
+    return position >= text.size();
+}
+
+/// Move past the current character; with `is_padding` it is not part of the token (the token starts after it).
+pub void ScanLexer.advance(bool is_padding) {
+    if (position >= text.size()) {
+        return;
+    }
+    int lead = text.byte_at(position);
+    int length = 1;
+    if (lead >= 240) {
+        length = 4;
+    } else if (lead >= 224) {
+        length = 3;
+    } else if (lead >= 192) {
+        length = 2;
+    }
+    position = position + length;
+    if (position > farthest) {
+        farthest = position;
+    }
+    if (is_padding) {
+        token_start = position;
+    }
+}
+
+/// The token ends here, whatever the scanner reads after.
+pub void ScanLexer.mark_end() {
+    marked_end = position;
+}
+
+/// Where the token ends: the last mark, or the position.
+pub int ScanLexer.token_end() {
+    if (marked_end >= 0) {
+        return marked_end;
+    }
+    return position;
+}

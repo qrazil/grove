@@ -1,0 +1,152 @@
+/* Lua's external scanner (tree-sitter-lua, scanner.c, 194 lines), rewritten.
+ *
+ * Four things that a regular lexer cannot do: a long bracket `[==[ ... ]==]` closes only with the same
+ * number of `=`, in strings and in `--[==[ ... ]==]` comments. The state is the number of `=` of the
+ * bracket being read and, for a short comment's content, the character that ends it (always 0 in the
+ * grammar this was written against; kept for fidelity).
+ *
+ * Token indices: 0 comment start, 1 comment content, 2 comment end, 3 string start, 4 string content,
+ * 5 string end. */
+
+import core.GRV_scan;
+
+const int COMMENT_START = 0;
+const int COMMENT_CONTENT = 1;
+const int COMMENT_END = 2;
+const int STRING_START = 3;
+const int STRING_CONTENT = 4;
+const int STRING_END = 5;
+
+pub type LuaScanner {
+    int ending_char = 0;
+    int level_count = 0;
+}
+
+void LuaScanner.reset() {
+    ending_char = 0;
+    level_count = 0;
+}
+
+bool LuaScanner.can_scan_block_start(GRV_scan.ScanLexer lexer) {
+    if (did_consume_char(lexer, 91)) {
+        int level = consume_and_count(lexer, 61);
+        if (did_consume_char(lexer, 91)) {
+            level_count = level;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LuaScanner.can_scan_block_end(GRV_scan.ScanLexer lexer) {
+    if (did_consume_char(lexer, 93)) {
+        int level = consume_and_count(lexer, 61);
+        if (level_count == level && did_consume_char(lexer, 93)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LuaScanner.can_scan_block_content(GRV_scan.ScanLexer lexer) {
+    while (lexer.lookahead() != 0) {
+        if (lexer.lookahead() == 93) {
+            lexer.mark_end();
+            if (can_scan_block_end(lexer)) {
+                return true;
+            }
+        } else {
+            lexer.advance(false);
+        }
+    }
+    return false;
+}
+
+bool LuaScanner.can_scan_comment_start(GRV_scan.ScanLexer lexer) {
+    if (did_consume_char(lexer, 45) && did_consume_char(lexer, 45)) {
+        lexer.mark_end();
+        if (can_scan_block_start(lexer)) {
+            lexer.mark_end();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LuaScanner.can_scan_comment_content(GRV_scan.ScanLexer lexer) {
+    if (ending_char == 0) {
+        return can_scan_block_content(lexer);
+    }
+    while (lexer.lookahead() != 0) {
+        if (lexer.lookahead() == ending_char) {
+            reset();
+            return true;
+        }
+        lexer.advance(false);
+    }
+    return false;
+}
+
+pub int LuaScanner.scan(GRV_scan.ScanLexer lexer, List<bool> valid) {
+    if (valid[STRING_END] && can_scan_block_end(lexer)) {
+        reset();
+        return STRING_END;
+    }
+    if (valid[STRING_CONTENT] && can_scan_block_content(lexer)) {
+        return STRING_CONTENT;
+    }
+    if (valid[COMMENT_END] && ending_char == 0 && can_scan_block_end(lexer)) {
+        reset();
+        return COMMENT_END;
+    }
+    if (valid[COMMENT_CONTENT] && can_scan_comment_content(lexer)) {
+        return COMMENT_CONTENT;
+    }
+    while (is_space(lexer.lookahead())) {
+        lexer.advance(true);
+    }
+    if (valid[STRING_START] && can_scan_block_start(lexer)) {
+        return STRING_START;
+    }
+    if (valid[COMMENT_START] && can_scan_comment_start(lexer)) {
+        return COMMENT_START;
+    }
+    return -1;
+}
+
+pub bytes LuaScanner.save() {
+    bytes out = [ending_char, level_count];
+    return out;
+}
+
+pub void LuaScanner.restore(bytes state) {
+    if (state.size() == 0) {
+        reset();
+        return;
+    }
+    ending_char = state[0];
+    if (state.size() > 1) {
+        level_count = state[1];
+    }
+}
+
+bool did_consume_char(GRV_scan.ScanLexer lexer, int wanted) {
+    if (lexer.lookahead() != wanted) {
+        return false;
+    }
+    lexer.advance(false);
+    return true;
+}
+
+int consume_and_count(GRV_scan.ScanLexer lexer, int wanted) {
+    int count = 0;
+    while (lexer.lookahead() == wanted) {
+        count = count + 1;
+        lexer.advance(false);
+    }
+    return count;
+}
+
+bool is_space(int code_point) {
+    return code_point == 32 || (code_point >= 9 && code_point <= 13) || code_point == 133 || code_point == 160;
+}
